@@ -31,6 +31,7 @@ services:
       TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:?required}
       MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-https://chatgpt.com}
     logging:
+      driver: local
       options: {max-size: "10m", max-file: "3"}
   keycloak:
     image: quay.io/keycloak/keycloak:26.6.3
@@ -60,6 +61,7 @@ services:
     volumes:
       - ./deploy/keycloak/kis-realm.json:/opt/keycloak/data/import/kis-realm.json:ro
     logging:
+      driver: local
       options: {max-size: "10m", max-file: "3"}
   postgres:
     image: postgres:17.6-alpine
@@ -76,4 +78,5 @@ services:
       timeout: 5s
       retries: 10
     logging:
+      driver: local
       options: {max-size: "10m", max-file: "3"}

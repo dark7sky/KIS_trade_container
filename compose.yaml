@@ -1,0 +1,79 @@
+name: kis-trade
+services:
+  mcp:
+    build: .
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    ports:
+      - "${PRIVATE_BIND_IP:?set private interface}:8000:8000"
+    volumes:
+      - "${DATA_DIR:?set absolute host data path}/mcp:/data"
+    environment:
+      DATA_DIR: /data
+      KIS_DEMO_APP_KEY: ${KIS_DEMO_APP_KEY:?required}
+      KIS_DEMO_APP_SECRET: ${KIS_DEMO_APP_SECRET:?required}
+      KIS_DEMO_ACCOUNT_NO: ${KIS_DEMO_ACCOUNT_NO:?required}
+      KIS_DEMO_ACCOUNT_PRODUCT_CODE: ${KIS_DEMO_ACCOUNT_PRODUCT_CODE:?required}
+      KIS_REAL_APP_KEY: ${KIS_REAL_APP_KEY:?required}
+      KIS_REAL_APP_SECRET: ${KIS_REAL_APP_SECRET:?required}
+      KIS_REAL_ACCOUNT_NO: ${KIS_REAL_ACCOUNT_NO:?required}
+      KIS_REAL_ACCOUNT_PRODUCT_CODE: ${KIS_REAL_ACCOUNT_PRODUCT_CODE:?required}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?required}
+      TELEGRAM_ALLOWED_CHAT_ID: ${TELEGRAM_ALLOWED_CHAT_ID:?required}
+      ORDER_SUPERVISOR_INTERVAL_SECONDS: ${ORDER_SUPERVISOR_INTERVAL_SECONDS:-10}
+      MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:?required}
+      OAUTH_ISSUER: ${OAUTH_ISSUER:?required}
+      OAUTH_ALLOWED_SUB: ${OAUTH_ALLOWED_SUB:?required}
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:?required}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-https://chatgpt.com}
+    logging:
+      options: {max-size: "10m", max-file: "3"}
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.6.3
+    command: [start, --import-realm]
+    restart: unless-stopped
+    ports:
+      - "${PRIVATE_BIND_IP:?required}:8080:8080"
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      KC_HOSTNAME: ${KEYCLOAK_PUBLIC_URL:?required}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_PROXY_TRUSTED_ADDRESSES: ${TRUSTED_PROXY_IPS:?required}
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?required}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?required}
+      MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:?required}
+      OAUTH_ALLOWED_SUB: ${OAUTH_ALLOWED_SUB:?required}
+      CHATGPT_CLIENT_SECRET: ${CHATGPT_CLIENT_SECRET:?required}
+      CHATGPT_REDIRECT_URI: ${CHATGPT_REDIRECT_URI:?required}
+      TRADER_INITIAL_PASSWORD: ${TRADER_INITIAL_PASSWORD:?required}
+    volumes:
+      - ./deploy/keycloak/kis-realm.json:/opt/keycloak/data/import/kis-realm.json:ro
+    logging:
+      options: {max-size: "10m", max-file: "3"}
+  postgres:
+    image: postgres:17.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes:
+      - "${DATA_DIR:?required}/postgres:/var/lib/postgresql/data"
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U keycloak -d keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      options: {max-size: "10m", max-file: "3"}

@@ -1,0 +1,2 @@
+#!/bin/sh
+exec python scripts/check_git_secrets.py --staged

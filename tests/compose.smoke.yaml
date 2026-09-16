@@ -1,0 +1,21 @@
+# Combine with compose.yaml and tests/compose.test.env only.
+# No host ports, no persistent volumes, no external network connectivity.
+services:
+  mcp:
+    image: kis-trade-mcp:local
+    ports: !reset []
+    volumes: !reset []
+    tmpfs:
+      - /data:uid=10001,gid=10001,mode=0700
+    restart: "no"
+  keycloak:
+    ports: !reset []
+    restart: "no"
+  postgres:
+    volumes: !reset []
+    tmpfs:
+      - /var/lib/postgresql/data
+    restart: "no"
+networks:
+  default:
+    internal: true

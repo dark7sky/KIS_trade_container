@@ -24,7 +24,7 @@ def test_git_ignores_secret_and_runtime_files():
     tracked = subprocess.run(
         ["git", "ls-files", "-z"], capture_output=True, cwd=ROOT, check=True
     ).stdout
-    assert b".env\0" not in tracked
+    assert b".env" not in tracked.rstrip(b"\0").split(b"\0")
 
 
 def test_git_guard_handles_nested_files():

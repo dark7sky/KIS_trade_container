@@ -21,6 +21,8 @@ PUBLIC_ORDER_FIELDS = (
     "filled",
     "cancelled",
     "remaining",
+    "broker_remaining",
+    "expired",
     "average_price",
     "created_at",
     "last_checked",
@@ -165,6 +167,8 @@ class TradingService:
                 "filled": 0,
                 "cancelled": 0,
                 "remaining": request.quantity,
+                "broker_remaining": request.quantity,
+                "expired": 0,
                 "average_price": "0",
                 "filled_amount": "0",
                 "pending_cancel": None,
@@ -230,6 +234,8 @@ class TradingService:
         if len(matches) != 1:
             raise TradingError("Original broker order not uniquely found; state retained")
         row = matches[0]
+        if row.get("ord_dt") not in (None, "", order["date"]):
+            raise TradingError("Broker order date differs; state retained")
         filled = integer(row["tot_ccld_qty"])
         remaining = integer(row["rmn_qty"])
         rejected = integer(row.get("rjct_qty") or "0")
@@ -278,8 +284,21 @@ class TradingService:
                 and child.get("cncl_yn") == "Y"
             ):
                 cancelled = max(cancelled, order["quantity"] - filled - remaining - rejected)
-        if filled + cancelled > order["quantity"]:
+        if filled + cancelled + remaining + rejected > order["quantity"]:
             raise TradingError("Inconsistent cancellation quantities; state retained")
+        # Only supported day orders are eligible. Wait until the next KST date:
+        # session calendars/after-market eligibility are not stored by this server.
+        # Reconcile broker quantities first; a zero unexplained remainder is NOT
+        # proof of expiry. Keep the original historical quantity separately.
+        day_elapsed = (
+            order["exchange"] in ("KRX", "NXT")
+            and order["order_type"] in ("limit", "market")
+            and datetime.strptime(order["date"], "%Y%m%d").date()
+            < datetime.now(KST).date()
+        )
+        expired = remaining if day_elapsed or order.get("expired", 0) > 0 else 0
+        if expired and filled + cancelled + remaining + rejected != order["quantity"]:
+            raise TradingError("Incomplete broker quantities; state retained")
         average = number(row.get("avg_prvs") or "0")
         amount = (
             number(row["tot_ccld_amt"])
@@ -293,7 +312,9 @@ class TradingService:
         order.update(
             filled=filled,
             cancelled=cancelled,
-            remaining=remaining,
+            remaining=remaining - expired,
+            broker_remaining=remaining,
+            expired=expired,
             average_price=str(average),
             filled_amount=str(amount),
             last_checked=datetime.now(KST).isoformat(),
@@ -311,6 +332,8 @@ class TradingService:
         )
         if remaining == 0 and filled + cancelled + rejected != order["quantity"]:
             order["status"] = "needs_review"
+        if expired:
+            order["status"] = "expired"
         with self.store.transaction():
             if filled > old_filled:
                 delta = filled - old_filled
@@ -428,6 +451,8 @@ class TradingService:
             order = await self.refresh(order)
             if order.get("pending_cancel"):
                 raise TradingError("Previous cancellation is still being reconciled")
+            if order["remaining"] <= 0:
+                raise TradingError("Quantity exceeds currently cancellable remainder")
             capacity = min(order["remaining"], await self.broker.cancel_capacity(order))
             quantity = request.quantity if request.quantity is not None else capacity
             if quantity <= 0 or quantity > capacity:

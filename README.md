@@ -1,5 +1,7 @@
 # KIS Trading MCP
 
+개발·작업 인계는 [에이전트 시작 안내](AGENTS.md)와 [구조·알고리즘·운영 인계 문서](docs/AGENT_HANDOFF.md)를 먼저 참고하세요.
+
 ChatGPT 웹에서 개인 한국투자증권 계좌를 조회하고 국내주식 현금 주문을 전송하는 MCP 서버입니다. Python MCP SDK의 Streamable HTTP, Keycloak OAuth, SQLite 주문 이력, Telegram 체결 알림을 사용합니다.
 
 ## 거래 동작

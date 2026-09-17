@@ -244,16 +244,36 @@ class TradingService:
         # A cancellation receipt is an authoritative link when KIS omits the
         # parent-link/classification fields from that child in daily history.
         pending_cancel_broker_id = (order.get("pending_cancel") or {}).get("broker_id")
+        cancellation_broker_ids = {
+            *self.store.cancellation_broker_ids(order["id"]),
+            *([pending_cancel_broker_id] if pending_cancel_broker_id else []),
+        }
+        legacy_cancel_quantity = order["quantity"] - filled - rejected
+        legacy_cancel_children = [
+            child
+            for child in rows
+            if order["status"] == "needs_review"
+            and child.get("cncl_yn") == "Y"
+            and integer(child.get("rjct_qty") or "0") == 0
+            and child.get("pdno") == order["symbol"]
+            and child.get("sll_buy_dvsn_cd") == ("02" if order["side"] == "buy" else "01")
+            and integer(child.get("ord_qty") or "0") == legacy_cancel_quantity
+        ]
         for child in rows:
             is_linked_cancel_child = (
                 same_id(child.get("orgn_odno", ""), order["broker_id"])
                 and child.get("rvse_cncl_dvsn_cd") == "02"
             )
-            is_receipted_cancel_child = bool(pending_cancel_broker_id) and same_id(
-                child.get("odno", ""), pending_cancel_broker_id
+            is_receipted_cancel_child = any(
+                same_id(child.get("odno", ""), broker_id)
+                for broker_id in cancellation_broker_ids
             )
             if (
-                (is_linked_cancel_child or is_receipted_cancel_child)
+                (
+                    is_linked_cancel_child
+                    or is_receipted_cancel_child
+                    or (len(legacy_cancel_children) == 1 and child is legacy_cancel_children[0])
+                )
                 and integer(child.get("rjct_qty") or "0") == 0
                 and child.get("cncl_yn") == "Y"
             ):
@@ -328,6 +348,8 @@ class TradingService:
                     else "not_cancelled",
                     "cancelled_quantity": cancelled - pending["baseline_cancelled"],
                 }
+                if pending.get("broker_id"):
+                    result["cancellation_broker_id"] = pending["broker_id"]
                 self.store.update_request(pending["request_id"], result)
                 order["pending_cancel"] = None
             self.store.put(order)

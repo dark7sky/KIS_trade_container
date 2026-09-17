@@ -244,6 +244,7 @@ async def test_cancel_child_receipt_confirms_cancellation_when_parent_flag_is_un
 
     assert final["status"] == "cancelled"
     assert final["cancelled"] == 10
+    assert (await service.cancel(cancel))["cancellation_broker_id"] == "cancel-1"
     assert (await service.cancel(cancel))["cancelled_quantity"] == 10
 
 
@@ -272,6 +273,57 @@ async def test_refresh_reuses_persisted_cancel_receipt_for_legacy_needs_review_o
 
     assert final["status"] == "cancelled"
     assert final["cancelled"] == 10
+
+
+async def test_refresh_resyncs_unique_legacy_cancel_child_without_receipt(service, broker):
+    order = await service.place(buy(side="sell"))
+    legacy = service.store.get(order["id"])
+    legacy.update(status="needs_review", cancelled=0, remaining=0, pending_cancel=None)
+    service.store.put(legacy)
+    broker.rows["real"][0].update(cncl_yn="N", rmn_qty="0")
+    broker.rows["real"].append(
+        {
+            "odno": "historic-cancel",
+            "orgn_odno": "",
+            "rvse_cncl_dvsn_cd": "",
+            "cncl_yn": "Y",
+            "rjct_qty": "0",
+            "pdno": "005930",
+            "sll_buy_dvsn_cd": "01",
+            "ord_qty": "10",
+        }
+    )
+
+    final = await service.get_order(order["id"])
+
+    assert final["status"] == "cancelled"
+    assert final["cancelled"] == 10
+
+
+async def test_refresh_keeps_ambiguous_legacy_cancel_child_in_review(service, broker):
+    order = await service.place(buy(side="sell"))
+    legacy = service.store.get(order["id"])
+    legacy.update(status="needs_review", cancelled=0, remaining=0, pending_cancel=None)
+    service.store.put(legacy)
+    broker.rows["real"][0].update(cncl_yn="N", rmn_qty="0")
+    for broker_id in ("historic-cancel-1", "historic-cancel-2"):
+        broker.rows["real"].append(
+            {
+                "odno": broker_id,
+                "orgn_odno": "",
+                "rvse_cncl_dvsn_cd": "",
+                "cncl_yn": "Y",
+                "rjct_qty": "0",
+                "pdno": "005930",
+                "sll_buy_dvsn_cd": "01",
+                "ord_qty": "10",
+            }
+        )
+
+    final = await service.get_order(order["id"])
+
+    assert final["status"] == "needs_review"
+    assert final["cancelled"] == 0
 
 
 async def test_query_error_preserves_state(service, broker):

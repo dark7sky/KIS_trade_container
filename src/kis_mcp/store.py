@@ -111,6 +111,17 @@ class Store:
     def update_request(self, request_id, result):
         self.db.execute("UPDATE requests SET result=? WHERE id=?", (encoded(result), request_id))
 
+    def cancellation_broker_ids(self, order_id):
+        ids = []
+        for row in self.db.execute("SELECT result FROM requests WHERE kind='cancel'"):
+            result = json.loads(row[0])
+            if result.get("order_id") != order_id:
+                continue
+            broker_id = result.get("cancellation_broker_id")
+            if broker_id is not None and str(broker_id).strip():
+                ids.append(str(broker_id))
+        return ids
+
     def event(self, event_id, event, message):
         self.db.execute("INSERT OR IGNORE INTO events VALUES (?,?)", (event_id, encoded(event)))
         self.db.execute(

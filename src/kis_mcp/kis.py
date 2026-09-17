@@ -50,6 +50,7 @@ class KIS:
         self.tokens = {}
         self.token_locks = {mode: asyncio.Lock() for mode in BASE}
         self.rate_locks = {mode: asyncio.Lock() for mode in BASE}
+        self.call_locks = {mode: asyncio.Lock() for mode in BASE}
         self.last_call = {mode: 0.0 for mode in BASE}
         self.last_token_attempt = {mode: 0.0 for mode in BASE}
         self.health = {mode: "not_checked" for mode in BASE}
@@ -122,12 +123,13 @@ class KIS:
                 "tr_cont": continuation,
             }
             try:
-                response = await self.client.request(
-                    "POST" if write else "GET",
-                    BASE[mode] + path,
-                    headers=headers,
-                    **({"json": params} if write else {"params": params}),
-                )
+                async with self.call_locks[mode]:
+                    response = await self.client.request(
+                        "POST" if write else "GET",
+                        BASE[mode] + path,
+                        headers=headers,
+                        **({"json": params} if write else {"params": params}),
+                    )
                 if response.status_code >= 500 or response.status_code == 429:
                     if write:
                         raise UncertainSubmission(

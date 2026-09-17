@@ -247,6 +247,33 @@ async def test_cancel_child_receipt_confirms_cancellation_when_parent_flag_is_un
     assert (await service.cancel(cancel))["cancelled_quantity"] == 10
 
 
+async def test_refresh_reuses_persisted_cancel_receipt_for_legacy_needs_review_order(
+    service, broker
+):
+    order = await service.place(buy(side="sell"))
+    cancel = CancelInput(client_request_id="cancel-request-1", order_id=order["id"])
+    assert (await service.cancel(cancel))["status"] == "accepted"
+
+    legacy = service.store.get(order["id"])
+    legacy.update(status="needs_review", cancelled=0, remaining=0, pending_cancel=None)
+    service.store.put(legacy)
+    broker.rows["real"][0].update(cncl_yn="N", rmn_qty="0")
+    broker.rows["real"].append(
+        {
+            "odno": "cancel-1",
+            "orgn_odno": "",
+            "rvse_cncl_dvsn_cd": "",
+            "cncl_yn": "Y",
+            "rjct_qty": "0",
+        }
+    )
+
+    final = await service.get_order(order["id"])
+
+    assert final["status"] == "cancelled"
+    assert final["cancelled"] == 10
+
+
 async def test_query_error_preserves_state(service, broker):
     order = await service.place(buy())
     broker.query_error = TradingError("query unavailable")

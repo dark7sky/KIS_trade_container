@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 
@@ -167,6 +168,32 @@ async def test_kis_modes_and_no_write_retry(settings):
         await broker.call("real", "/order", "WRITE", {}, write=True)
     assert len([r for r in seen if r.url.path == "/order"]) == 1
     await broker.close()
+
+
+async def test_kis_serializes_concurrent_calls_per_mode(settings):
+    active_calls = 0
+
+    async def handler(request):
+        nonlocal active_calls
+        if active_calls:
+            raise RuntimeError("concurrent KIS request")
+        active_calls += 1
+        try:
+            await asyncio.sleep(0.2)
+            return httpx.Response(200, json={"rt_cd": "0", "output": {}})
+        finally:
+            active_calls -= 1
+
+    broker = KIS(settings, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    broker.tokens["real"] = ("test-token", time.time() + 3600)
+    try:
+        responses = await asyncio.gather(
+            broker.call("real", "/query-one", "READ", {}),
+            broker.call("real", "/query-two", "READ", {}),
+        )
+        assert [response[0]["rt_cd"] for response in responses] == ["0", "0"]
+    finally:
+        await broker.close()
 
 
 async def test_token_failure_before_write_is_not_unknown(settings):

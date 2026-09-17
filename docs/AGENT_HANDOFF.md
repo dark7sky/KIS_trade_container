@@ -1,12 +1,16 @@
 # KIS Trading MCP 에이전트 인계
 
-최종 문서 점검: 2026-09-18 (Asia/Seoul). 코드 기준: `5be99e1`.
+최종 문서 점검: 2026-09-18 (Asia/Seoul). 코드 기준: `d8882d1`.
 이 문서는 대화 없이 작업을 이어가기 위한 지도다. 실행 시점의 Git·컨테이너·브로커 상태는 다시 확인해야 한다.
 실제 비밀값과 주문 식별자는 기록하지 않는다.
 
 ## 1. 현재 상태와 다음 작업
 
-### 2026-09-18 전일 주문 만료 수정 (배포 진행)
+### 2026-09-18 전일 주문 만료 수정 (배포 완료)
+
+- 코드 커밋 `d8882d1` (`fix: expire reconciled previous-day order remainders`)을 `origin/main`에 푸시하고 Docker VM `/srv/kis-trade`에 같은 커밋의 추적 파일을 동기화했다. MCP만 재빌드·재기동했다.
+- 컨테이너 `kis-trade-mcp-1`: `healthy`. 실제 import되는 `/usr/local/lib/python3.13/site-packages/kis_mcp/service.py` SHA-256은 로컬 커밋 파일과 동일한 `57d85627c7f6b1eed2a5a1b7d9f8bbe6e2163caa1394bcfecbb0130d989b6d49`다.
+- 공개 `/healthz` HTTP 200, 미인증 `/mcp` 초기화 요청 HTTP 401 확인. `.env`와 영속 데이터는 보존했다. 실제 주문·취소·모드 변경 및 인증된 계좌 조회는 검증으로 실행하지 않았다.
 
 - 원인: `refresh`가 일별조회 `rmn_qty`를 주문일과 무관하게 활성 잔량으로 사용했다. 사용자 보고의 전일 모의주문이 계속 `accepted`로 남는 경로를 가짜 브로커로 재현했다.
 - `service.py`는 `broker_remaining`(일별 내역 잔량), `remaining`(만료분 제외 잔량), `expired`(만료수량)를 분리한다. 현재 지원하는 KRX/NXT 지정가·시장가에 한해 주문일 < 현재 KST 날짜이면, 성공한 재조회에서 수량 보존을 확인한 후 잔량을 만료 처리한다. 별도 DB 스키마 변경은 없다.
@@ -15,7 +19,7 @@
 - 범위: **다음 KST 날짜부터 보수적으로 확정**한다. 당일 세션별 즉시 만료는 미구현이다. KRX 정규/애프터 및 NXT의 효력이 다르고 저장된 주문에 세션/유효기간 정보가 없으므로, 장 마감 시각을 단일 상수로 하드코딩하지 않는다. `remaining`은 실시간 취소가능수량과 같지 않으며 `list_orders`는 여전히 저장 스냅샷이다.
 - 근거: [한국투자증권 시장별 주문유지 안내](https://file.truefriend.com/Storage/customer/guide/regards/nxt01.html), [KIS 취소가능조회 공식 샘플](https://github.com/koreainvestment/open-trading-api/blob/main/examples_llm/domestic_stock/inquire_psbl_rvsecncl/inquire_psbl_rvsecncl.py). 당일 종료시각/휴장/세션 정책을 확장할 때 재확인한다. 모의 취소가능조회 부재를 잔고의 매도가능수량으로 대체해 만료 추정하지 않는다.
 - 회귀 테스트: `tests/test_expiry.py`. 실전/모의·KRX/NXT·지정가/시장가, 부분체결, 취소와 만료 공존, 전량체결 우선, 조회 실패, 재시작, 지연 체결, 미확정 취소, 목록 재조회 포함.
-- 실행 검증 결과는 아래 최신 기록을 참고한다. 이번 변경의 운영 배포와 기존 계좌 주문 재동기화는 아직 수행하지 않았다.
+- 실행 검증 결과는 아래 최신 기록을 참고한다. 운영 배포는 완료했지만 기존 계좌 주문이 실제로 재동기화됐는지는 별도 조회로 확인하지 않았다. 정상 폴링 시 새 만료 로직이 적용된다.
 
 - `bfecf18`: 취소 접수번호로 취소 자주문을 연결해 원주문 취소 상태를 반영.
 - `5eeab44`: 병렬 호출과 과거 취소 재동기화 재현 테스트.
@@ -164,7 +168,7 @@ JWT는 RS256/JWKS, issuer, `/mcp` audience, 만료, 허용 사용자 sub, `kis:a
 
 ## 7. 검증 방법과 마지막 증거
 
-2026-09-18 만료 변경 검증: `pytest tests/test_expiry.py -q` 24 passed; `pytest -q -k 'not mcp_http_auth_initialization_tools_and_call'` 72 passed, 1 deselected (배포 전 재실행 통과). `git diff --check` 통과. `pip_audit -r requirements.lock` 알려진 취약점 없음. HTTP 통합 테스트는 기존 정지 이력으로 제외하며 실환경 전체 통과로 해석하지 않는다. 사용자 커밋·푸시·배포 승인 후 진행 중이며 완료 증거는 배포 후 갱신한다.
+2026-09-18 만료 변경 검증: `pytest tests/test_expiry.py -q` 24 passed; `pytest -q -k 'not mcp_http_auth_initialization_tools_and_call'` 72 passed, 1 deselected (배포 전 재실행 통과). `git diff --check` 통과. `pip_audit -r requirements.lock` 알려진 취약점 없음. HTTP 통합 테스트는 기존 정지 이력으로 제외하며 실환경 전체 통과로 해석하지 않는다. 배포 후 공개 HTTP 검증 결과는 §1에 기록했다.
 
 테스트는 가짜 자격정보·가짜 KIS/Telegram·임시 DB를 사용하고 `.env`를 로드하지 않는다.
 

@@ -241,10 +241,19 @@ class TradingService:
         if row.get("cncl_qty") not in (None, ""):
             cancelled = max(cancelled, integer(row["cncl_qty"]))
         # Partial cancellations may be represented only as successful child orders.
+        # A cancellation receipt is an authoritative link when KIS omits the
+        # parent-link/classification fields from that child in daily history.
+        pending_cancel_broker_id = (order.get("pending_cancel") or {}).get("broker_id")
         for child in rows:
-            if (
+            is_linked_cancel_child = (
                 same_id(child.get("orgn_odno", ""), order["broker_id"])
                 and child.get("rvse_cncl_dvsn_cd") == "02"
+            )
+            is_receipted_cancel_child = bool(pending_cancel_broker_id) and same_id(
+                child.get("odno", ""), pending_cancel_broker_id
+            )
+            if (
+                (is_linked_cancel_child or is_receipted_cancel_child)
                 and integer(child.get("rjct_qty") or "0") == 0
                 and child.get("cncl_yn") == "Y"
             ):

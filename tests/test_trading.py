@@ -222,6 +222,31 @@ async def test_cancel_success_is_not_notified_until_observed(service, broker):
     assert service.store.pending_count() == 1
 
 
+async def test_cancel_child_receipt_confirms_cancellation_when_parent_flag_is_unset(service, broker):
+    order = await service.place(buy(side="sell"))
+    cancel = CancelInput(client_request_id="cancel-request-1", order_id=order["id"])
+    assert (await service.cancel(cancel))["status"] == "accepted"
+
+    # KIS can mark only the cancellation child as cancelled. The receipt binds
+    # that child to this request even when the daily-history relation fields are absent.
+    broker.rows["real"][0].update(cncl_yn="N", rmn_qty="0")
+    broker.rows["real"].append(
+        {
+            "odno": "cancel-1",
+            "orgn_odno": "",
+            "rvse_cncl_dvsn_cd": "",
+            "cncl_yn": "Y",
+            "rjct_qty": "0",
+        }
+    )
+
+    final = await service.get_order(order["id"])
+
+    assert final["status"] == "cancelled"
+    assert final["cancelled"] == 10
+    assert (await service.cancel(cancel))["cancelled_quantity"] == 10
+
+
 async def test_query_error_preserves_state(service, broker):
     order = await service.place(buy())
     broker.query_error = TradingError("query unavailable")

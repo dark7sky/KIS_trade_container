@@ -40,6 +40,35 @@ class FakeBroker:
             "sell_quantity": 100,
         }
 
+    async def balance(self, *args):
+        return (
+            [
+                {
+                    "pdno": "012450",
+                    "prdt_name": "한화에어로스페이스",
+                    "hldg_qty": "1",
+                    "ord_psbl_qty": "1",
+                    "pchs_avg_pric": "1000000",
+                    "prpr": "1078000",
+                    "evlu_amt": "1078000",
+                    "evlu_pfls_amt": "78000",
+                    "evlu_pfls_rt": "7.80",
+                }
+            ],
+            [{"tot_evlu_amt": "1078000"}],
+        )
+
+    async def quote(self, mode, symbol, exchange):
+        return {
+            "symbol": symbol,
+            "exchange": exchange,
+            "price": "1089000",
+            "upper_limit": "1400000",
+            "lower_limit": "750000",
+            "asks": [],
+            "bids": [],
+        }
+
     async def capacity(self, *args):
         return self.capacity_result
 

@@ -110,6 +110,8 @@ class TradingService:
         return {
             "mode": mode,
             "exchange": exchange,
+            "price_observed_at": datetime.now(KST).isoformat(),
+            "price_time_basis": "server_received_at",
             "holdings": [{k: r.get(k) for k in fields} for r in rows],
             "summary": [{k: r.get(k) for k in summary_fields} for r in summary],
         }
@@ -117,7 +119,13 @@ class TradingService:
     async def quote(self, symbol, exchange):
         mode = self.store.mode()
         self.check_exchange(mode, exchange)
-        return {"mode": mode} | await self.broker.quote(mode, symbol, exchange)
+        quote = await self.broker.quote(mode, symbol, exchange)
+        return {
+            "mode": mode,
+            **quote,
+            "price_observed_at": datetime.now(KST).isoformat(),
+            "price_time_basis": "server_received_at",
+        }
 
     async def capacity(self, symbol, price, exchange):
         mode = self.store.mode()

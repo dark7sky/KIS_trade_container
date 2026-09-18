@@ -104,12 +104,12 @@ def create_app(settings=None, *, broker=None, verifier=None, notifier=None):
 
     @mcp.tool(annotations=read, meta=oauth_meta)
     async def get_account(exchange: Exchange = "KRX") -> dict:
-        """활성 모드 계좌의 예수금, 보유종목, 평가금액·손익 조회."""
+        """활성 모드 계좌의 예수금, 보유종목, 평가금액·손익과 가격 관측시각 조회."""
         return await safe(service.account(exchange))
 
     @mcp.tool(annotations=read, meta=oauth_meta)
     async def get_quote(symbol: Symbol, exchange: Exchange = "KRX") -> dict:
-        """종목코드로 거래소별 현재가와 10단계 호가 조회."""
+        """종목코드로 거래소별 현재가·10단계 호가와 가격 관측시각 조회."""
         return await safe(service.quote(symbol, exchange))
 
     @mcp.tool(annotations=read, meta=oauth_meta)

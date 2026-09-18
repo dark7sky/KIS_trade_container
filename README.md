@@ -21,8 +21,8 @@ ChatGPT 웹에서 개인 한국투자증권 계좌를 조회하고 국내주식 
 | --- | --- |
 | `get_status` | 전역 모드, 마지막 API 상태, 추적 오류, 알림 대기열 |
 | `set_mode` | `mode`: real 또는 demo |
-| `get_account` | `exchange`: KRX 기본, NXT 선택 |
-| `get_quote` | `symbol`, `exchange`: 현재가·10단계 호가 |
+| `get_account` | `exchange`: KRX 기본, NXT 선택. 잔고 평가가격 관측시각 포함 |
+| `get_quote` | `symbol`, `exchange`: 현재가·10단계 호가와 가격 관측시각 |
 | `get_order_capacity` | `symbol`, `price`, `exchange`: 현금 주문가능액·수량 |
 | `place_order` | `client_request_id`, `symbol`, `side`, `quantity`, `exchange`, `order_type`, `price` |
 | `list_orders` | `start_date`, `end_date`: YYYY-MM-DD, 최근 90일 |
@@ -34,6 +34,8 @@ ChatGPT 웹에서 개인 한국투자증권 계좌를 조회하고 국내주식 
 종목은 6자리 코드(ETN은 Q+6자리), 매수/매도는 buy/sell, 주문유형은 limit/market입니다. 지정가는 양의 정수 원, 시장가는 `price=0`입니다. `client_request_id`는 8~100자의 영문·숫자·`_.:-`입니다.
 
 `get_order`와 `cancel_order`는 현재 모드가 아닌 **주문의 원래 계좌**를 사용합니다. 계좌번호 설정이 바뀌면 기존 주문에 접근하지 않고 오류를 반환합니다.
+
+`get_account`와 `get_quote`는 `price_observed_at`을 KST 오프셋이 포함된 ISO-8601 형식으로 반환합니다. `price_time_basis`가 `server_received_at`이면 이는 서버가 KIS 응답을 받은 시각이며 거래소의 마지막 체결시각은 아닙니다. 잔고의 `prpr`와 별도 현재가 `price`는 서로 다른 KIS 조회 스냅샷이므로, 가격 차이를 판단할 때 값과 관측시각을 함께 비교해야 합니다.
 
 ## 설치 및 설정
 

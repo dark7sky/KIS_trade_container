@@ -1,12 +1,12 @@
 # KIS Trading MCP 에이전트 인계
 
-최종 문서 점검: 2026-09-19 (Asia/Seoul). 코드 기준: 실전거래 안정화 배포 준비(아래 검증 기록 참고).
+최종 문서 점검: 2026-09-19 (Asia/Seoul). 코드 기준: `28a1a63` 실전거래 안정화 배포 완료.
 이 문서는 대화 없이 작업을 이어가기 위한 지도다. 실행 시점의 Git·컨테이너·브로커 상태는 다시 확인해야 한다.
 실제 비밀값과 주문 식별자는 기록하지 않는다.
 
 ## 1. 현재 상태와 다음 작업
 
-### 2026-09-19 실전 AI 클라이언트용 MCP 안정화 (로컬 구현, 미배포)
+### 2026-09-19 실전 AI 클라이언트용 MCP 안정화 (배포 완료)
 
 - 사용자 범위 정리: 전략 구성, 위험한도, 손익 제한, 종목·수량 판단은 MCP 서버 밖의 AI 클라이언트가 담당한다. 이 서버는 증권 정보, 계좌 정보, 주문·취소 실행과 상태 추적에 집중한다.
 - 과거 취소 자동 추정 위험을 줄였다. `needs_review` 상태의 legacy 취소 후보는 `orgn_odno`가 비어 있는 경우에만 보수적으로 채택한다. 다른 원주문 번호가 명시된 취소 자주문은 단일 후보라도 원주문 취소로 연결하지 않고 `needs_review`를 유지한다.
@@ -14,11 +14,13 @@
 - `place_order`와 `cancel_order`에 선택 입력 `expected_mode`를 추가했다. 신규 주문은 현재 서버 모드와 비교하고, 취소는 원주문의 저장된 모드와 비교한다. 다르면 브로커 POST 전에 `mode_mismatch` 오류를 낸다.
 - `get_quote`는 기존 `price_observed_at` 외에 `component_observations.price.received_at`과 `component_observations.orderbook.received_at`을 반환한다. `get_account`도 `component_observations.balance.received_at`을 반환한다. 모두 서버가 KIS 응답을 받은 시각이며 거래소 체결시각이 아니다.
 - MCP 도구 오류는 JSON 문자열 형태의 공개 오류 `{error:{code,message}}`로 감싼다. 고정 코드에는 `mode_mismatch`, `order_unknown`, `broker_rate_limited`, `broker_timeout`, `broker_rejected`, `trading_error` 등이 있다. 원본 브로커 payload, 계좌, 토큰은 포함하지 않는다.
-- `/healthz`는 store 접근, background worker task, broker health cache를 반영한다. 준비되지 않았거나 worker가 종료되면 `degraded`와 HTTP 503을 반환한다. 이 변경은 아직 운영 컨테이너에 배포되지 않았다.
+- `/healthz`는 store 접근, background worker task, broker health cache를 반영한다. 준비되지 않았거나 worker가 종료되면 `degraded`와 HTTP 503을 반환한다. 운영 컨테이너에 반영하고 공개 HTTP 응답을 확인했다.
 - 로컬 검증: 새 RED 재현 후 GREEN 확인. `pytest -q -k 'not mcp_http_auth_initialization_tools_and_call'` 87 passed, 1 deselected; `pip_audit -r requirements.lock` 알려진 취약점 없음; `git diff --check` 통과. 기존 정지 이력의 MCP HTTP 초기화 테스트는 제외했고 전체 E2E 통과로 해석하지 않는다. 실제 주문·취소·모드 변경은 실행하지 않았다.
 - 배포 전 검토: `expected_mode=None`을 요청 비교 payload에서 제외해 업그레이드 전 저장된 요청 ID의 멱등 재시도 호환성을 보존했다. 주문·취소 재현 테스트 RED 2건 확인 후 수정했다(재현 커밋 `ce69064`). 도구 설명의 재시도·취소 접수 의미도 보존했다.
 - 최종 로컬 검증: 90 passed, 1 deselected; 전체 커버리지 82%, service 90%. ASGI lifespan에서 `/healthz` 200 및 worker 종료 후 503을 가짜 브로커로 확인했다. 기존 TestClient 기반 MCP HTTP 초기화 테스트는 정지 이력으로 제외했다. `pip_audit -r requirements.lock` 알려진 취약점 없음, `git diff --check` 통과.
-- 사용자 커밋·푸시·배포 승인에 따라 배포 준비 완료. 운영 재빌드 및 배포 후 검증은 아직 수행하지 않았다.
+- 배포 완료: 코드 `28a1a63`을 `origin/main`에 푸시하고 Docker VM `/srv/kis-trade`에 같은 HEAD를 동기화했다. MCP만 재빌드·재기동했으며 컨테이너 `kis-trade-mcp-1`은 `healthy`. 설치된 `app.py`, `service.py`, `kis.py`, `models.py` SHA-256 모두 커밋과 일치했다.
+- 배포 후 검증: 공개 `/healthz` HTTP 200 및 store/workers `ok`, 미인증 `/mcp` 초기화 HTTP 401. `.env`·영속 데이터 보존. 실제 주문·취소·모드 변경이나 인증된 계좌 도구 호출은 수행하지 않았다.
+- 기존 미커밋 원격 제어 문서 부분은 이번 커밋에서 제외해 작업 트리에 보존했다. 이 배포 완료 기록은 후속 문서 커밋으로 푸시한다.
 
 ### 2026-09-18 가격 관측시각 응답 추가 (배포 준비)
 
@@ -198,7 +200,6 @@ JWT는 RS256/JWKS, issuer, `/mcp` audience, 만료, 허용 사용자 sub, `kis:a
 
 1. **과거 취소 후보 추정의 잔여 위험**: 원주문 번호가 없는 단일 후보는 여전히 자동 추정 경로가 남아 있어 소유권을 완전히 증명하지 못한다. 명시적 취소 접수번호/원주문 연결에만 의존하는 후속 개선이 필요하다.
 
-**배포 진행 상태**: 2026-09-19 안정화 변경은 로컬 테스트만 통과했다. 커밋·푸시·운영 컨테이너 재빌드와 공개 `/healthz`/미인증 `/mcp` 검증이 끝나기 전에는 운영에 반영된 것으로 해석하지 않는다.
 2. **병렬 오류 원인 미확정**: 새 테스트는 모의 HTTP에서 요청 버스트를 재현한 것이다. 사용자 환경의 내부 오류가 반드시 이 원인이라는 증거는 없다. 비밀값을 제외한 오류 종류·호출 순서·시간을 확보해 확인한다.
 3. **취소 결과와 주문 결과의 불일치**: 과거 pending이 이미 삭제되었다면 원주문 재동기화가 예전 `cancel_order` 요청 결과까지 고치지는 않는다. 같은 요청 ID 재호출은 그 저장 결과를 반환한다. 잔량 0만 먼저 보이는 경우 pending이 조기에 닫히는 흐름도 계속 검토한다.
 4. **미검증 실환경 영역**: 실계좌 인증/권한/계좌번호, 실전 KRX/NXT 주문코드, 네트워크 단절 직후 복구, 운영 재시작 추적, 장전/동시호가/장후, 실제 부분체결, 수수료·세금·정산금. 가짜 브로커 테스트와 실환경 검증을 구분한다.

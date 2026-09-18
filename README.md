@@ -8,6 +8,7 @@ ChatGPT 웹에서 개인 한국투자증권 계좌를 조회하고 국내주식 
 
 - **처음 시작하면 실전(real)** 입니다. `set_mode("demo")`로 모의투자 전환 후 사용하세요. 모드는 모든 대화가 공유하고 재시작 후에도 유지됩니다.
 - `place_order`, `cancel_order`는 검증 후 즉시 전송합니다. `LIVE_TRADING_ENABLED`, `KIS_ENV`, `OPENAI_*`, `AUTO_TRADE_*`는 사용하지 않습니다.
+- 전략 구성, 위험한도, 손익 제한, 종목·수량 판단은 이 MCP 서버 밖의 클라이언트가 담당합니다. 이 서버는 증권 정보, 계좌 정보, 주문·취소 실행과 그 결과 추적에 집중합니다.
 - 실전 KRX/NXT, 모의 KRX의 지정가·시장가 주문만 지원합니다. NXT 모의투자, 신용·미수·공매도·SOR·자동매매·주문 정정은 지원하지 않습니다.
 - 현금 매수가능수량과 금액을 모두 확인합니다. 시장가 수량은 KIS가 계산한 미수 없는 시장가 주문가능수량으로 제한합니다. 외부 HTS/MTS의 동시 주문·출금까지 서버가 잠글 수는 없으므로 계좌 자체도 증거금 100%/미수 미사용 설정을 권합니다.
 - 가격·시간·거래소별 종목 적격성의 최종 판단은 KIS가 수행합니다. 거절 시 다른 시장·계좌·주문 유형으로 자동 재주문하지 않습니다.
@@ -22,20 +23,21 @@ ChatGPT 웹에서 개인 한국투자증권 계좌를 조회하고 국내주식 
 | `get_status` | 전역 모드, 마지막 API 상태, 추적 오류, 알림 대기열 |
 | `set_mode` | `mode`: real 또는 demo |
 | `get_account` | `exchange`: KRX 기본, NXT 선택. 잔고 평가가격 관측시각 포함 |
-| `get_quote` | `symbol`, `exchange`: 현재가·10단계 호가와 가격 관측시각 |
+| `get_quote` | `symbol`, `exchange`: 현재가·10단계 호가와 가격·호가별 관측시각 |
 | `get_order_capacity` | `symbol`, `price`, `exchange`: 현금 주문가능액·수량 |
-| `place_order` | `client_request_id`, `symbol`, `side`, `quantity`, `exchange`, `order_type`, `price` |
+| `place_order` | `client_request_id`, `symbol`, `side`, `quantity`, `exchange`, `order_type`, `price`, 선택 `expected_mode` |
 | `list_orders` | `start_date`, `end_date`: YYYY-MM-DD, 최근 90일 |
 | `get_order` | `order_id`: 서버가 반환한 UUID |
-| `cancel_order` | 새 `client_request_id`, `order_id`, 선택 `quantity` |
+| `cancel_order` | 새 `client_request_id`, `order_id`, 선택 `quantity`, 선택 `expected_mode` |
 | `resolve_order` | `order_id`, `broker_id`: 응답 유실 후 사용자가 확인한 KIS 주문번호 연결 |
 | `resolve_order_not_submitted` | `order_id`: 사용자가 KIS 주문내역에서 주문이 없음을 확인한 응답 유실 주문을 미접수로 확정 |
 
 종목은 6자리 코드(ETN은 Q+6자리), 매수/매도는 buy/sell, 주문유형은 limit/market입니다. 지정가는 양의 정수 원, 시장가는 `price=0`입니다. `client_request_id`는 8~100자의 영문·숫자·`_.:-`입니다.
+`expected_mode`는 `real` 또는 `demo`입니다. `place_order`는 현재 서버 모드가 다르면 전송하지 않고, `cancel_order`는 원주문의 모드가 다르면 전송하지 않습니다.
 
 `get_order`와 `cancel_order`는 현재 모드가 아닌 **주문의 원래 계좌**를 사용합니다. 계좌번호 설정이 바뀌면 기존 주문에 접근하지 않고 오류를 반환합니다.
 
-`get_account`와 `get_quote`는 `price_observed_at`을 KST 오프셋이 포함된 ISO-8601 형식으로 반환합니다. `price_time_basis`가 `server_received_at`이면 이는 서버가 KIS 응답을 받은 시각이며 거래소의 마지막 체결시각은 아닙니다. 잔고의 `prpr`와 별도 현재가 `price`는 서로 다른 KIS 조회 스냅샷이므로, 가격 차이를 판단할 때 값과 관측시각을 함께 비교해야 합니다.
+`get_account`와 `get_quote`는 `price_observed_at`을 KST 오프셋이 포함된 ISO-8601 형식으로 반환합니다. `get_quote`는 `component_observations.price.received_at`과 `component_observations.orderbook.received_at`도 함께 반환합니다. `price_time_basis` 또는 구성 요소의 `time_basis`가 `server_received_at`이면 이는 서버가 KIS 응답을 받은 시각이며 거래소의 마지막 체결시각은 아닙니다. 잔고의 `prpr`와 별도 현재가 `price`는 서로 다른 KIS 조회 스냅샷이므로, 가격 차이를 판단할 때 값과 관측시각을 함께 비교해야 합니다.
 
 ## 설치 및 설정
 

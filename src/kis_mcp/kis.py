@@ -113,7 +113,6 @@ class KIS:
             raise
         credentials = self.settings.credentials[mode]
         for attempt in range(1 if write else 3):
-            await self.throttle(mode)
             headers = {
                 "authorization": "Bearer " + token,
                 "appkey": credentials.key,
@@ -124,6 +123,7 @@ class KIS:
             }
             try:
                 async with self.call_locks[mode]:
+                    await self.throttle(mode)
                     response = await self.client.request(
                         "POST" if write else "GET",
                         BASE[mode] + path,
@@ -212,16 +212,28 @@ class KIS:
         price, _ = await self.call(
             mode, "/uapi/domestic-stock/v1/quotations/inquire-price", "FHKST01010100", params
         )
+        price_observed_at = datetime.now(KST).isoformat()
         book, _ = await self.call(
             mode,
             "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
             "FHKST01010200",
             params,
         )
+        book_observed_at = datetime.now(KST).isoformat()
         p, b = price["output"], book["output1"]
         return {
             "symbol": symbol,
             "exchange": exchange,
+            "component_observations": {
+                "price": {
+                    "received_at": price_observed_at,
+                    "time_basis": "server_received_at",
+                },
+                "orderbook": {
+                    "received_at": book_observed_at,
+                    "time_basis": "server_received_at",
+                },
+            },
             "price": p.get("stck_prpr"),
             "upper_limit": p.get("stck_mxpr"),
             "lower_limit": p.get("stck_llam"),

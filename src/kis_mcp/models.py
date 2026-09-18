@@ -18,6 +18,7 @@ class OrderInput(BaseModel):
     exchange: Exchange = "KRX"
     order_type: OrderType = "limit"
     price: Decimal = Field(default=Decimal("0"), ge=0, allow_inf_nan=False)
+    expected_mode: Mode | None = None
 
     @model_validator(mode="after")
     def price_valid(self):
@@ -35,19 +36,29 @@ class CancelInput(BaseModel):
     client_request_id: str = Field(min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_.:-]+$")
     order_id: str
     quantity: int | None = Field(default=None, gt=0, strict=True)
+    expected_mode: Mode | None = None
 
 
 class TradingError(Exception):
     """Only fixed, non-sensitive messages may be exposed to clients."""
 
+    def __init__(self, message, *, code=None):
+        super().__init__(message)
+        self.code = code
+
 
 class BrokerRejected(TradingError):
-    pass
+    def __init__(self, message):
+        super().__init__(message, code="broker_rejected")
 
 
 class SubmissionNotSent(TradingError):
     """A failure before the write request was sent; safe to make a new request."""
 
+    def __init__(self, message):
+        super().__init__(message, code="submission_not_sent")
+
 
 class UncertainSubmission(TradingError):
-    pass
+    def __init__(self, message):
+        super().__init__(message, code="submission_unknown")

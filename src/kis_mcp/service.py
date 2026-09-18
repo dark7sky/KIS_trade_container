@@ -61,6 +61,14 @@ class TradingService:
                 "Demo supports KRX only; no real-account or exchange fallback is allowed"
             )
 
+    @staticmethod
+    def check_expected_mode(expected_mode, actual_mode):
+        if expected_mode is not None and expected_mode != actual_mode:
+            raise TradingError(
+                "Server mode changed before this request could be sent",
+                code="mode_mismatch",
+            )
+
     async def status(self):
         return {
             "mode": self.store.mode(),
@@ -88,6 +96,7 @@ class TradingService:
         mode = self.store.mode()
         self.check_exchange(mode, exchange)
         rows, summary = await self.broker.balance(mode, exchange)
+        observed_at = datetime.now(KST).isoformat()
         fields = (
             "pdno",
             "prdt_name",
@@ -110,8 +119,11 @@ class TradingService:
         return {
             "mode": mode,
             "exchange": exchange,
-            "price_observed_at": datetime.now(KST).isoformat(),
+            "price_observed_at": observed_at,
             "price_time_basis": "server_received_at",
+            "component_observations": {
+                "balance": {"received_at": observed_at, "time_basis": "server_received_at"}
+            },
             "holdings": [{k: r.get(k) for k in fields} for r in rows],
             "summary": [{k: r.get(k) for k in summary_fields} for r in summary],
         }
@@ -120,10 +132,18 @@ class TradingService:
         mode = self.store.mode()
         self.check_exchange(mode, exchange)
         quote = await self.broker.quote(mode, symbol, exchange)
+        observed_at = datetime.now(KST).isoformat()
+        quote.setdefault(
+            "component_observations",
+            {
+                "price": {"received_at": observed_at, "time_basis": "server_received_at"},
+                "orderbook": {"received_at": observed_at, "time_basis": "server_received_at"},
+            },
+        )
         return {
             "mode": mode,
             **quote,
-            "price_observed_at": datetime.now(KST).isoformat(),
+            "price_observed_at": observed_at,
             "price_time_basis": "server_received_at",
         }
 
@@ -136,6 +156,9 @@ class TradingService:
 
     async def place(self, request):
         payload = request.model_dump(mode="json")
+        # Preserve persisted pre-upgrade retry identity when this option is omitted.
+        if request.expected_mode is None:
+            payload.pop("expected_mode")
         # Decimal's lexical form must not change retry identity.
         payload["price"] = str(int(request.price))
         async with self.lock:
@@ -143,6 +166,7 @@ class TradingService:
             if previous is not None:
                 return public_order(self.store.get(previous["id"]))
             mode = self.store.mode()
+            self.check_expected_mode(request.expected_mode, mode)
             self.check_exchange(mode, request.exchange)
             if any(
                 o["mode"] == mode and o["status"] in ("unknown", "submitting")
@@ -274,6 +298,7 @@ class TradingService:
             and child.get("pdno") == order["symbol"]
             and child.get("sll_buy_dvsn_cd") == ("02" if order["side"] == "buy" else "01")
             and integer(child.get("ord_qty") or "0") == legacy_cancel_quantity
+            and str(child.get("orgn_odno") or "").strip() == ""
         ]
         for child in rows:
             is_linked_cancel_child = (
@@ -450,11 +475,15 @@ class TradingService:
 
     async def cancel(self, request):
         payload = request.model_dump(mode="json")
+        # Preserve persisted pre-upgrade retry identity when this option is omitted.
+        if request.expected_mode is None:
+            payload.pop("expected_mode")
         async with self.lock:
             previous = self.store.request(request.client_request_id, "cancel", payload)
             if previous is not None:
                 return previous
             order = self.store.get(request.order_id)
+            self.check_expected_mode(request.expected_mode, order["mode"])
             self.check_account(order)
             if not order["broker_id"] or order["status"] in ("rejected", "unknown", "submitting"):
                 raise TradingError("Order has no confirmed broker identity")

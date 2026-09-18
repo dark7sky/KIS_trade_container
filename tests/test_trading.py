@@ -70,6 +70,31 @@ async def test_idempotency_concurrency_and_mode_binding(service, broker):
         await service.place(buy(quantity=9))
 
 
+async def test_expected_mode_blocks_place_before_broker_io(service, broker):
+    await service.set_mode("demo")
+
+    with pytest.raises(TradingError, match="mode changed"):
+        await service.place(buy(expected_mode="real"))
+
+    assert not broker.placed
+
+
+async def test_expected_mode_blocks_cancel_before_broker_io(service, broker):
+    order = await service.place(buy())
+    await service.set_mode("demo")
+
+    with pytest.raises(TradingError, match="mode changed"):
+        await service.cancel(
+            CancelInput(
+                client_request_id="cancel-request-1",
+                order_id=order["id"],
+                expected_mode="demo",
+            )
+        )
+
+    assert not broker.cancelled
+
+
 async def test_demo_nxt_rejected_without_io(service, broker):
     await service.set_mode("demo")
     with pytest.raises(TradingError, match="Demo supports KRX"):
@@ -384,6 +409,31 @@ async def test_refresh_resyncs_unique_legacy_cancel_child_without_receipt(servic
 
     assert final["status"] == "cancelled"
     assert final["cancelled"] == 10
+
+
+async def test_refresh_ignores_legacy_cancel_child_with_different_parent(service, broker):
+    order = await service.place(buy(side="sell"))
+    legacy = service.store.get(order["id"])
+    legacy.update(status="needs_review", cancelled=0, remaining=0, pending_cancel=None)
+    service.store.put(legacy)
+    broker.rows["real"][0].update(cncl_yn="N", rmn_qty="0")
+    broker.rows["real"].append(
+        {
+            "odno": "historic-cancel",
+            "orgn_odno": "different-parent",
+            "rvse_cncl_dvsn_cd": "02",
+            "cncl_yn": "Y",
+            "rjct_qty": "0",
+            "pdno": "005930",
+            "sll_buy_dvsn_cd": "01",
+            "ord_qty": "10",
+        }
+    )
+
+    final = await service.get_order(order["id"])
+
+    assert final["status"] == "needs_review"
+    assert final["cancelled"] == 0
 
 
 async def test_refresh_keeps_ambiguous_legacy_cancel_child_in_review(service, broker):

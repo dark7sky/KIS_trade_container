@@ -1,10 +1,24 @@
 # KIS Trading MCP 에이전트 인계
 
-최종 문서 점검: 2026-09-18 (Asia/Seoul). 코드 기준: `2ae9e50` 이후 문서 변경 포함.
+최종 문서 점검: 2026-09-19 (Asia/Seoul). 코드 기준: 실전거래 안정화 배포 준비(아래 검증 기록 참고).
 이 문서는 대화 없이 작업을 이어가기 위한 지도다. 실행 시점의 Git·컨테이너·브로커 상태는 다시 확인해야 한다.
 실제 비밀값과 주문 식별자는 기록하지 않는다.
 
 ## 1. 현재 상태와 다음 작업
+
+### 2026-09-19 실전 AI 클라이언트용 MCP 안정화 (로컬 구현, 미배포)
+
+- 사용자 범위 정리: 전략 구성, 위험한도, 손익 제한, 종목·수량 판단은 MCP 서버 밖의 AI 클라이언트가 담당한다. 이 서버는 증권 정보, 계좌 정보, 주문·취소 실행과 상태 추적에 집중한다.
+- 과거 취소 자동 추정 위험을 줄였다. `needs_review` 상태의 legacy 취소 후보는 `orgn_odno`가 비어 있는 경우에만 보수적으로 채택한다. 다른 원주문 번호가 명시된 취소 자주문은 단일 후보라도 원주문 취소로 연결하지 않고 `needs_review`를 유지한다.
+- KIS 업무 API 호출 간격을 실제 전송 잠금 안에서 보장하도록 바꿨다. 느린 선행 요청 뒤에 여러 동시 요청이 잠금 뒤에서 몰려 나가는 버스트를 막는다. POST 자동 재시도 금지 정책은 유지한다.
+- `place_order`와 `cancel_order`에 선택 입력 `expected_mode`를 추가했다. 신규 주문은 현재 서버 모드와 비교하고, 취소는 원주문의 저장된 모드와 비교한다. 다르면 브로커 POST 전에 `mode_mismatch` 오류를 낸다.
+- `get_quote`는 기존 `price_observed_at` 외에 `component_observations.price.received_at`과 `component_observations.orderbook.received_at`을 반환한다. `get_account`도 `component_observations.balance.received_at`을 반환한다. 모두 서버가 KIS 응답을 받은 시각이며 거래소 체결시각이 아니다.
+- MCP 도구 오류는 JSON 문자열 형태의 공개 오류 `{error:{code,message}}`로 감싼다. 고정 코드에는 `mode_mismatch`, `order_unknown`, `broker_rate_limited`, `broker_timeout`, `broker_rejected`, `trading_error` 등이 있다. 원본 브로커 payload, 계좌, 토큰은 포함하지 않는다.
+- `/healthz`는 store 접근, background worker task, broker health cache를 반영한다. 준비되지 않았거나 worker가 종료되면 `degraded`와 HTTP 503을 반환한다. 이 변경은 아직 운영 컨테이너에 배포되지 않았다.
+- 로컬 검증: 새 RED 재현 후 GREEN 확인. `pytest -q -k 'not mcp_http_auth_initialization_tools_and_call'` 87 passed, 1 deselected; `pip_audit -r requirements.lock` 알려진 취약점 없음; `git diff --check` 통과. 기존 정지 이력의 MCP HTTP 초기화 테스트는 제외했고 전체 E2E 통과로 해석하지 않는다. 실제 주문·취소·모드 변경은 실행하지 않았다.
+- 배포 전 검토: `expected_mode=None`을 요청 비교 payload에서 제외해 업그레이드 전 저장된 요청 ID의 멱등 재시도 호환성을 보존했다. 주문·취소 재현 테스트 RED 2건 확인 후 수정했다(재현 커밋 `ce69064`). 도구 설명의 재시도·취소 접수 의미도 보존했다.
+- 최종 로컬 검증: 90 passed, 1 deselected; 전체 커버리지 82%, service 90%. ASGI lifespan에서 `/healthz` 200 및 worker 종료 후 503을 가짜 브로커로 확인했다. 기존 TestClient 기반 MCP HTTP 초기화 테스트는 정지 이력으로 제외했다. `pip_audit -r requirements.lock` 알려진 취약점 없음, `git diff --check` 통과.
+- 사용자 커밋·푸시·배포 승인에 따라 배포 준비 완료. 운영 재빌드 및 배포 후 검증은 아직 수행하지 않았다.
 
 ### 2026-09-18 가격 관측시각 응답 추가 (배포 준비)
 
@@ -146,7 +160,7 @@ rejected  = rjct_qty (없으면 0)
 
 - `TradingService.lock`: 주문/취소/갱신/모드 변경의 서비스 상태 보호. 모든 조회 도구를 한꺼번에 잠그지는 않는다.
 - `KIS.call_locks[mode]`: 같은 모드의 업무 API HTTP 요청을 직렬화. 실전/모의 잠금은 별개다.
-- `rate_locks[mode]`: `throttle`에서 실전 0.15초, 모의 1.05초 간격을 계산한다. **현재 throttle은 call 잠금 바깥에 있다.**
+- `rate_locks[mode]`: `throttle`에서 실전 0.15초, 모의 1.05초 간격을 계산한다. 전송 직전 `call_locks[mode]` 안에서 실행해 느린 요청 뒤의 대기열 버스트를 막는다.
 - `token_locks[mode]`: 토큰 발급 중복 방지. 만료 60초 전 갱신, 발급 시도 간 61초 제한. 토큰은 메모리에만 있다.
 - GET은 최대 3회. 네트워크/응답 파싱 실패, HTTP 429/5xx, `EGW00201` 등 해당 분기에 1초·2초 백오프. 모든 브로커 거절을 재시도하지는 않는다.
 - 주문/취소 POST는 1회. 전송 전 토큰 실패는 `SubmissionNotSent`; 전송 후 불확실성은 `UncertainSubmission`.
@@ -174,19 +188,20 @@ SQLite 스키마 버전은 `1`, 파일은 `DATA_DIR/trading.sqlite3`. WAL + sync
 
 Compose는 호스트 `${DATA_DIR}/mcp`를 MCP `/data`에, `${DATA_DIR}/postgres`를 PostgreSQL에 연결한다. PostgreSQL에는 거래 상태가 없다. 계좌 지문은 계좌번호+상품코드의 SHA-256이며 공개 주문 응답에서 제외된다.
 
-JWT는 RS256/JWKS, issuer, `/mcp` audience, 만료, 허용 사용자 sub, `kis:access`, `azp=chatgpt-kis`를 검사한다. Host/Origin 검사도 활성화한다. `/healthz`의 `ok`는 앱 응답 확인일 뿐 브로커 인증/조회 정상 여부를 보장하지 않는다.
+JWT는 RS256/JWKS, issuer, `/mcp` audience, 만료, 허용 사용자 sub, `kis:access`, `azp=chatgpt-kis`를 검사한다. Host/Origin 검사도 활성화한다. `/healthz`는 store와 worker 상태 및 broker health cache를 보여주지만, 브로커 인증/조회 성공을 새로 검증하는 엔드포인트는 아니다.
 
 필수 설정 이름은 `.env.example`과 `Settings.from_env`를 따른다. 양쪽 모드 자격정보를 모두 요구한다. Keycloak realm import는 최초 생성용이므로 `.env` 수정만으로 기존 realm 설정이 바뀌지 않는다.
 
 ## 6. 알려진 위험과 후속 검토
 
-아래는 2026-09-18 코드 읽기로 식별한 사항이다. 이 문서 작업에서는 실행 로직을 수정하지 않았다.
+아래는 2026-09-19 기준 남은 위험이다. 운영 배포 전에는 로컬 수정사항을 운영 반영으로 해석하지 않는다.
 
-1. **과거 취소 후보의 자동 연결 위험**: `legacy_cancel_children`는 `needs_review`에서 종목·매매방향·수량·취소 플래그·거절수량만으로 단일 후보를 채택한다. 원주문 연결번호나 소유권을 요구하지 않아 같은 날 다른 주문의 취소를 오인할 수 있다. 앞선 설명의 “유일하므로 안전”은 보장이 아니다. 운영 자동 복구 전 이 추정을 제거/제한하거나 명시적 운영자 확인 절차를 설계해야 한다.
-2. **직렬화와 호출 간격의 차이**: 앞 요청이 느리면 여러 요청이 throttle을 통과한 뒤 call 잠금에서 기다릴 수 있다. 잠금 해제 후 실제 전송 간격이 설정값보다 짧아질 수 있다. 전송 잠금 안에서 간격을 보장하는지 검토하고 지연된 첫 요청 뒤 5개 동시 조회로 검증한다. 토큰 발급은 별도 잠금 경로다.
-3. **병렬 오류 원인 미확정**: 새 테스트는 모의 HTTP에서 요청 겹침을 재현한 것이다. 사용자 환경의 내부 오류가 반드시 이 원인이라는 증거는 없다. 비밀값을 제외한 오류 종류·호출 순서·시간을 확보해 확인한다.
-4. **취소 결과와 주문 결과의 불일치**: 과거 pending이 이미 삭제되었다면 원주문 재동기화가 예전 `cancel_order` 요청 결과까지 고치지는 않는다. 같은 요청 ID 재호출은 그 저장 결과를 반환한다. 잔량 0만 먼저 보이는 경우 pending이 조기에 닫히는 흐름도 검토한다.
-5. **미검증 실환경 영역**: 실계좌 인증/권한/계좌번호, 실전 KRX/NXT 주문코드, 네트워크 단절 직후 복구, 운영 재시작 추적, 장전/동시호가/장후, 실제 부분체결, 수수료·세금·정산금. 가짜 브로커 테스트와 실환경 검증을 구분한다.
+1. **과거 취소 후보 추정의 잔여 위험**: 원주문 번호가 없는 단일 후보는 여전히 자동 추정 경로가 남아 있어 소유권을 완전히 증명하지 못한다. 명시적 취소 접수번호/원주문 연결에만 의존하는 후속 개선이 필요하다.
+
+**배포 진행 상태**: 2026-09-19 안정화 변경은 로컬 테스트만 통과했다. 커밋·푸시·운영 컨테이너 재빌드와 공개 `/healthz`/미인증 `/mcp` 검증이 끝나기 전에는 운영에 반영된 것으로 해석하지 않는다.
+2. **병렬 오류 원인 미확정**: 새 테스트는 모의 HTTP에서 요청 버스트를 재현한 것이다. 사용자 환경의 내부 오류가 반드시 이 원인이라는 증거는 없다. 비밀값을 제외한 오류 종류·호출 순서·시간을 확보해 확인한다.
+3. **취소 결과와 주문 결과의 불일치**: 과거 pending이 이미 삭제되었다면 원주문 재동기화가 예전 `cancel_order` 요청 결과까지 고치지는 않는다. 같은 요청 ID 재호출은 그 저장 결과를 반환한다. 잔량 0만 먼저 보이는 경우 pending이 조기에 닫히는 흐름도 계속 검토한다.
+4. **미검증 실환경 영역**: 실계좌 인증/권한/계좌번호, 실전 KRX/NXT 주문코드, 네트워크 단절 직후 복구, 운영 재시작 추적, 장전/동시호가/장후, 실제 부분체결, 수수료·세금·정산금. 가짜 브로커 테스트와 실환경 검증을 구분한다.
 
 ## 7. 검증 방법과 마지막 증거
 

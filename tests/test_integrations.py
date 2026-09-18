@@ -8,7 +8,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from starlette.testclient import TestClient
 
-from kis_mcp.app import create_app
+from kis_mcp.app import create_app, public_error, runtime_health
 from kis_mcp.auth import KeycloakVerifier
 from kis_mcp.kis import KIS
 from kis_mcp.models import SubmissionNotSent, TradingError, UncertainSubmission
@@ -37,6 +37,13 @@ def signed(settings, key, **changes):
         "scope": "kis:access",
     } | changes
     return jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test-key"})
+
+
+def test_public_error_includes_stable_code_without_raw_payload():
+    assert public_error(TradingError("Server mode changed", code="mode_mismatch")) == {
+        "error": {"code": "mode_mismatch", "message": "Server mode changed"}
+    }
+    assert public_error(TradingError("Unknown MCP order ID"))["error"]["code"] == "order_unknown"
 
 
 @pytest.mark.parametrize(
@@ -145,6 +152,20 @@ def test_mcp_http_auth_initialization_tools_and_call(settings, rsa_keys, broker)
     assert not broker.placed
 
 
+def test_runtime_health_reports_components(service, broker):
+    class RunningTask:
+        def done(self):
+            return False
+
+    body, status_code = runtime_health(service, [RunningTask()], broker)
+
+    assert status_code == 200
+    assert body["status"] == "ok"
+    assert body["store"] == "ok"
+    assert body["workers"] == "ok"
+    assert body["broker"] == broker.health
+
+
 async def test_kis_modes_and_no_write_retry(settings):
     seen = []
 
@@ -194,6 +215,54 @@ async def test_kis_serializes_concurrent_calls_per_mode(settings):
         assert [response[0]["rt_cd"] for response in responses] == ["0", "0"]
     finally:
         await broker.close()
+
+
+async def test_kis_throttles_burst_after_slow_concurrent_call(settings):
+    starts = []
+
+    async def handler(request):
+        starts.append(time.monotonic())
+        if len(starts) == 1:
+            await asyncio.sleep(0.3)
+        return httpx.Response(200, json={"rt_cd": "0", "output": {}})
+
+    broker = KIS(settings, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    broker.tokens["real"] = ("test-token", time.time() + 3600)
+    try:
+        await asyncio.gather(
+            broker.call("real", "/query-one", "READ", {}),
+            broker.call("real", "/query-two", "READ", {}),
+            broker.call("real", "/query-three", "READ", {}),
+        )
+    finally:
+        await broker.close()
+
+    intervals = [right - left for left, right in zip(starts, starts[1:])]
+    assert min(intervals) >= 0.12
+
+
+async def test_kis_write_calls_are_throttled_but_not_retried(settings):
+    starts = []
+
+    async def handler(request):
+        starts.append(time.monotonic())
+        await asyncio.sleep(0.2 if len(starts) == 1 else 0)
+        raise httpx.ReadTimeout("test timeout")
+
+    broker = KIS(settings, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    broker.tokens["real"] = ("test-token", time.time() + 3600)
+    try:
+        results = await asyncio.gather(
+            broker.call("real", "/order-one", "WRITE", {}, write=True),
+            broker.call("real", "/order-two", "WRITE", {}, write=True),
+            return_exceptions=True,
+        )
+    finally:
+        await broker.close()
+
+    assert all(isinstance(result, UncertainSubmission) for result in results)
+    assert len(starts) == 2
+    assert starts[1] - starts[0] >= 0.12
 
 
 async def test_token_failure_before_write_is_not_unknown(settings):
@@ -324,3 +393,22 @@ async def test_telegram_retry_and_duplicate_suppression(settings):
     finally:
         await notifier.close()
         store.close()
+
+
+async def test_health_http_lifespan_and_failed_worker(settings, broker):
+    app = create_app(settings, broker=broker)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=settings.public_url
+        ) as client:
+            response = await client.get("/healthz")
+            assert response.status_code == 200
+            assert response.json()["workers"] == "ok"
+            worker = app.state.worker_tasks[0]
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            response = await client.get("/healthz")
+            assert response.status_code == 503
+            assert response.json()["workers"] == "unavailable"
+    assert not broker.placed
+    assert not broker.cancelled

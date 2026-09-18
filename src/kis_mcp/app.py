@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from decimal import Decimal
@@ -24,6 +25,48 @@ from .telegram import Notifications
 Symbol = Annotated[str, Field(pattern=r"^(?:\d{6}|Q\d{6})$")]
 
 
+def public_error(exc):
+    message = str(exc)
+    code = getattr(exc, "code", None)
+    if code is None:
+        if "mode changed" in message:
+            code = "mode_mismatch"
+        elif "Unknown MCP order ID" in message:
+            code = "order_unknown"
+        elif "rate" in message.lower() or "cooling down" in message:
+            code = "broker_rate_limited"
+        elif "KIS query failed" in message or "timeout" in message.lower():
+            code = "broker_timeout"
+        elif "rejected" in message.lower():
+            code = "broker_rejected"
+        elif "needs_review" in message:
+            code = "needs_review"
+        else:
+            code = "trading_error"
+    return {"error": {"code": code, "message": message}}
+
+
+def runtime_health(service, tasks, broker):
+    workers_ok = bool(tasks) and all(not task.done() for task in tasks)
+    store_ok = False
+    if service is not None:
+        try:
+            service.store.mode()
+            store_ok = True
+        except Exception:
+            store_ok = False
+    ready = service is not None and store_ok and workers_ok
+    return (
+        {
+            "status": "ok" if ready else "degraded",
+            "store": "ok" if store_ok else "unavailable",
+            "workers": "ok" if workers_ok else "unavailable",
+            "broker": getattr(broker, "health", {}),
+        },
+        200 if ready else 503,
+    )
+
+
 def create_app(settings=None, *, broker=None, verifier=None, notifier=None):
     settings = settings or Settings.from_env()
     # HTTP request logs would expose the Telegram token in its URL.
@@ -41,6 +84,7 @@ def create_app(settings=None, *, broker=None, verifier=None, notifier=None):
         service = TradingService(settings, store, broker)
         app.state.service = service
         tasks = [asyncio.create_task(service.supervise()), asyncio.create_task(notifications.run())]
+        app.state.worker_tasks = tasks
         try:
             # FastMCP's low-level lifespan is per request in stateless mode.
             # The database and workers instead belong to the ASGI application.
@@ -86,10 +130,18 @@ def create_app(settings=None, *, broker=None, verifier=None, notifier=None):
         try:
             return await awaitable
         except TradingError as exc:
-            raise ValueError(str(exc)) from None
+            raise ValueError(json.dumps(public_error(exc), ensure_ascii=False)) from None
         except Exception:
             raise ValueError(
-                "Operation failed; inspect server status and retained order state"
+                json.dumps(
+                    {
+                        "error": {
+                            "code": "operation_failed",
+                            "message": "Operation failed; inspect server status and retained order state",
+                        }
+                    },
+                    ensure_ascii=False,
+                )
             ) from None
 
     @mcp.tool(annotations=read, meta=oauth_meta)
@@ -130,8 +182,9 @@ def create_app(settings=None, *, broker=None, verifier=None, notifier=None):
         exchange: Exchange = "KRX",
         order_type: OrderType = "limit",
         price: Annotated[Decimal, Field(ge=0, allow_inf_nan=False)] = Decimal("0"),
+        expected_mode: Mode | None = None,
     ) -> dict:
-        """즉시 현금 주문. 지정가는 양의 정수 원, 시장가는 price=0. 요청 ID를 생성하고 재시도에는 같은 ID 사용. accepted는 접수일 뿐 체결 아님."""
+        """즉시 현금 주문. 지정가는 양의 정수 원, 시장가는 price=0. 재시도에는 같은 요청 ID 사용. expected_mode가 현재 모드와 다르면 전송하지 않음. accepted는 접수이며 체결 아님."""
         request = OrderInput(
             client_request_id=client_request_id,
             symbol=symbol,
@@ -140,6 +193,7 @@ def create_app(settings=None, *, broker=None, verifier=None, notifier=None):
             exchange=exchange,
             order_type=order_type,
             price=price,
+            expected_mode=expected_mode,
         )
         return await safe(service.place(request))
 
@@ -158,12 +212,16 @@ def create_app(settings=None, *, broker=None, verifier=None, notifier=None):
         client_request_id: str,
         order_id: str,
         quantity: Annotated[int | None, Field(strict=True, gt=0)] = None,
+        expected_mode: Mode | None = None,
     ) -> dict:
-        """원래 계좌의 미체결 잔량 취소. quantity 생략 시 가능한 잔량 전부. accepted는 취소 접수이며 완료는 추적 확인."""
+        """원래 계좌의 미체결 잔량 취소. quantity 생략 시 가능한 잔량 전부. expected_mode가 원주문 모드와 다르면 전송하지 않음. accepted는 취소 접수이며 완료는 추적 확인."""
         return await safe(
             service.cancel(
                 CancelInput(
-                    client_request_id=client_request_id, order_id=order_id, quantity=quantity
+                    client_request_id=client_request_id,
+                    order_id=order_id,
+                    quantity=quantity,
+                    expected_mode=expected_mode,
                 )
             )
         )
@@ -180,7 +238,12 @@ def create_app(settings=None, *, broker=None, verifier=None, notifier=None):
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def health(request):
-        return JSONResponse({"status": "ok"})
+        body, status_code = runtime_health(
+            getattr(request.app.state, "service", None),
+            getattr(request.app.state, "worker_tasks", []),
+            broker,
+        )
+        return JSONResponse(body, status_code=status_code)
 
     app = mcp.streamable_http_app()
     app.router.lifespan_context = lifespan

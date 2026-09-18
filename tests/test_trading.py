@@ -137,6 +137,92 @@ async def test_uncertain_order_not_resubmitted_or_auto_bound(service, broker):
     assert len(broker.placed) == 1
 
 
+async def test_operator_can_resolve_unknown_order_as_not_submitted(service, broker):
+    broker.place_error = UncertainSubmission("test")
+    order = await service.place(buy())
+    broker.rows["real"].clear()
+
+    resolved = await service.resolve_order_not_submitted(order["id"])
+
+    assert resolved["status"] == "not_submitted"
+    assert resolved["remaining"] == 0
+    assert resolved["broker_remaining"] == 0
+    assert resolved["resolution"] == "explicit_operator_no_broker_order"
+    assert "error" not in resolved
+    assert (await service.status())["unresolved_orders"] == []
+    assert (await service.place(buy()))["status"] == "not_submitted"
+    assert len(broker.placed) == 1
+
+    broker.place_error = None
+    fresh = await service.place(buy(client_request_id="new-request-2"))
+    assert fresh["status"] == "accepted"
+    assert len(broker.placed) == 2
+
+
+async def test_not_submitted_resolution_refuses_matching_broker_candidate(service, broker):
+    broker.place_error = UncertainSubmission("test")
+    order = await service.place(buy())
+
+    with pytest.raises(TradingError, match="matching broker order"):
+        await service.resolve_order_not_submitted(order["id"])
+
+    assert service.store.get(order["id"])["status"] == "unknown"
+
+
+async def test_not_submitted_resolution_requires_uncertain_state(service, broker):
+    order = await service.place(buy())
+
+    with pytest.raises(TradingError, match="not awaiting submission resolution"):
+        await service.resolve_order_not_submitted(order["id"])
+
+
+async def test_not_submitted_resolution_preserves_unknown_on_query_failure(service, broker):
+    broker.place_error = UncertainSubmission("test")
+    order = await service.place(buy())
+    broker.rows["real"].clear()
+    broker.query_error = TradingError("query unavailable")
+
+    with pytest.raises(TradingError, match="query unavailable"):
+        await service.resolve_order_not_submitted(order["id"])
+
+    assert service.store.get(order["id"])["status"] == "unknown"
+
+
+async def test_not_submitted_resolution_is_terminal_and_idempotent(service, broker):
+    broker.place_error = UncertainSubmission("test")
+    order = await service.place(buy())
+    broker.rows["real"].clear()
+    await service.resolve_order_not_submitted(order["id"])
+    broker.query_error = TradingError("must not query")
+
+    assert (await service.resolve_order_not_submitted(order["id"]))["status"] == "not_submitted"
+    assert (await service.get_order(order["id"]))["status"] == "not_submitted"
+    await service.poll()
+    assert service.poll_error is None
+
+
+async def test_not_submitted_resolution_survives_restart(settings, broker):
+    from kis_mcp.service import TradingService
+
+    store = Store(settings.data_dir)
+    service = TradingService(settings, store, broker)
+    broker.place_error = UncertainSubmission("test")
+    order = await service.place(buy())
+    broker.rows["real"].clear()
+    await service.resolve_order_not_submitted(order["id"])
+    store.close()
+
+    restored_store = Store(settings.data_dir)
+    try:
+        restored = TradingService(settings, restored_store, broker)
+        broker.query_error = TradingError("must not query")
+        assert (await restored.get_order(order["id"]))["status"] == "not_submitted"
+        await restored.poll()
+        assert restored.poll_error is None
+    finally:
+        restored_store.close()
+
+
 async def test_rejected_order_no_notification(service, broker):
     broker.place_error = BrokerRejected("Rejected")
     order = await service.place(buy())

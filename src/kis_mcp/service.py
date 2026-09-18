@@ -28,6 +28,8 @@ PUBLIC_ORDER_FIELDS = (
     "last_checked",
     "candidate_ids",
     "pending_cancel",
+    "resolution",
+    "resolved_at",
     "error",
 )
 
@@ -387,7 +389,7 @@ class TradingService:
     async def get_order(self, order_id):
         async with self.lock:
             order = self.store.get(order_id)
-            if order["status"] != "rejected":
+            if order["status"] not in ("rejected", "not_submitted"):
                 try:
                     order = await self.refresh(order)
                 except TradingError as exc:
@@ -526,12 +528,49 @@ class TradingService:
             self.store.put(order)
             return public_order(await self.refresh(order))
 
+    async def resolve_order_not_submitted(self, order_id):
+        """Operator attests no broker order exists after checking KIS history."""
+        async with self.lock:
+            order = self.store.get(order_id)
+            self.check_account(order)
+            if order["status"] == "not_submitted":
+                return public_order(order)
+            if order["status"] not in ("unknown", "submitting") or order["broker_id"]:
+                raise TradingError("Order is not awaiting submission resolution")
+            rows = await self.broker.daily(
+                order["mode"], order["date"], order["date"], order["exchange"]
+            )
+            candidates = self.candidates(order, rows)
+            if candidates:
+                order["candidate_ids"] = [str(row["odno"]) for row in candidates]
+                order["last_checked"] = datetime.now(KST).isoformat()
+                self.store.put(order)
+                raise TradingError(
+                    "A matching broker order exists; verify it and use resolve_order"
+                )
+            order.update(
+                status="not_submitted",
+                remaining=0,
+                broker_remaining=0,
+                expired=0,
+                resolution="explicit_operator_no_broker_order",
+                resolved_at=datetime.now(KST).isoformat(),
+                last_checked=datetime.now(KST).isoformat(),
+            )
+            order.pop("error", None)
+            order.pop("candidate_ids", None)
+            self.store.put(order)
+            return public_order(order)
+
     async def poll(self):
         errors = 0
         for snapshot in self.store.orders():
-            if snapshot["status"] in ("filled", "cancelled", "rejected") and not snapshot.get(
-                "pending_cancel"
-            ):
+            if snapshot["status"] in (
+                "filled",
+                "cancelled",
+                "rejected",
+                "not_submitted",
+            ) and not snapshot.get("pending_cancel"):
                 continue
             async with self.lock:
                 try:

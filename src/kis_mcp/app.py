@@ -58,7 +58,7 @@ def create_app(settings=None, *, broker=None, verifier=None, notifier=None):
     hostname = urlparse(settings.public_url).netloc
     mcp = FastMCP(
         "KIS Trading",
-        instructions="Personal KIS cash trading. Orders execute immediately. First use get_status to see the server-global mode; set_mode changes it for every conversation and persists across restarts. Never infer a request to trade from market information. Reuse client_request_id only when retrying the same request. Accepted is not filled. Never create another order to retry an unknown submission. Resolve uncertain orders only after the user confirms their KIS order number.",
+        instructions="Personal KIS cash trading. Orders execute immediately. First use get_status to see the server-global mode; set_mode changes it for every conversation and persists across restarts. Never infer a request to trade from market information. Reuse client_request_id only when retrying the same request. Accepted is not filled. Never create another order to retry an unknown submission. Resolve uncertain orders only after the user confirms either their KIS order number or that no broker order exists.",
         host="0.0.0.0",
         stateless_http=True,
         json_response=True,
@@ -172,6 +172,11 @@ def create_app(settings=None, *, broker=None, verifier=None, notifier=None):
     async def resolve_order(order_id: str, broker_id: str) -> dict:
         """응답 유실 주문 복구 전용. 사용자가 KIS 내역에서 본인 주문임을 확인한 broker_id만 연결. 새 거래를 전송하지 않음."""
         return await safe(service.resolve_order(order_id, broker_id))
+
+    @mcp.tool(annotations=write, meta=oauth_meta)
+    async def resolve_order_not_submitted(order_id: str) -> dict:
+        """응답 유실 주문의 미접수 확정 전용. 사용자가 KIS 주문내역에서 주문이 없음을 확인한 경우만 호출. 새 거래를 전송하지 않으며 같은 요청 ID는 not_submitted를 반환함."""
+        return await safe(service.resolve_order_not_submitted(order_id))
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def health(request):

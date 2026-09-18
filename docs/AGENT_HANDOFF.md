@@ -6,6 +6,15 @@
 
 ## 1. 현재 상태와 다음 작업
 
+### 2026-09-18 불명 주문 미접수 확정 (배포 진행)
+
+- 사용자 보고: 모의계좌 SK하이닉스 주문을 기존 요청 ID로 재시도해도 `unknown`; KIS 주문·보유 내역에는 해당 주문이 없었다. 중복 주문은 보내지 않았다.
+- `resolve_order_not_submitted(order_id)`를 추가했다. `unknown`/`submitting`, 브로커 번호 없음, 원래 계좌 일별조회 성공, 신규 주문 후보 0건을 모두 확인한 뒤에만 `not_submitted`로 종결한다. 후보 존재·조회 실패·다른 상태는 거부하고 원상태를 유지한다.
+- 이는 사용자의 KIS 내역/고객지원 확인을 기록하는 명시적 운영자 확정이다. API 조회에서 후보가 없다는 사실만으로 자동 실행하지 않는다. 증권사 POST를 보내지 않는다.
+- 종결 시 활성·브로커 잔량을 0으로 만들고 `resolution=explicit_operator_no_broker_order`, `resolved_at`을 기록한다. 오류와 후보 목록을 제거하며 재시작·폴링 후에도 terminal이다. 동일 주문 요청 ID는 `not_submitted`를 반환하고 새 주문을 보내지 않는다. 새 주문에는 새 요청 ID가 필요하다.
+- 회귀 테스트는 후보 존재, 조회 실패, 잘못된 상태, 멱등성, 신규 주문 차단 해제, 재시작 지속성을 포함한다. 실제 보고 주문의 상태 변경은 배포 후 해당 MCP `order_id`로 도구를 호출해야 하며 이 코드 작업만으로 자동 종결하지 않는다.
+- 배포 전 검증: 거래·만료 테스트 60 passed; `pytest -q -k 'not mcp_http_auth_initialization_tools_and_call'` 78 passed, 1 deselected; `pip_audit -r requirements.lock` 알려진 취약점 없음; `git diff --check` 통과. 기존 정지 이력의 MCP HTTP 통합 테스트는 제외했으므로 전체 E2E 통과로 해석하지 않는다.
+
 ### 2026-09-18 전일 주문 만료 수정 (배포 완료)
 
 - 코드 커밋 `d8882d1` (`fix: expire reconciled previous-day order remainders`)을 `origin/main`에 푸시하고 Docker VM `/srv/kis-trade`에 같은 커밋의 추적 파일을 동기화했다. MCP만 재빌드·재기동했다.
@@ -46,7 +55,7 @@ Keycloak:8080 → PostgreSQL (인증 데이터만)
 | 경로 | 책임 / 먼저 볼 함수 |
 | --- | --- |
 | `src/kis_mcp/app.py` | `create_app`, MCP 도구 등록, `safe`, ASGI lifespan, `main` |
-| `src/kis_mcp/service.py` | `place`, `refresh`, `cancel`, `resolve_order`, `poll`; 거래 정책과 상태 전이 |
+| `src/kis_mcp/service.py` | `place`, `refresh`, `cancel`, `resolve_order`, `resolve_order_not_submitted`, `poll`; 거래 정책과 상태 전이 |
 | `src/kis_mcp/kis.py` | `call`, `token`, `throttle`, `pages`; KIS API·재시도·필드 변환 |
 | `src/kis_mcp/store.py` | SQLite 트랜잭션, 멱등 요청, 취소 접수번호, 이벤트/outbox |
 | `src/kis_mcp/models.py` | 입력 타입·수량/가격 검증, 거래 예외 |
@@ -83,7 +92,7 @@ Uvicorn worker는 1개다. 앱 시작 시 Store, 주문 폴러, 알림 워커를
 
 가능수량·금액 확인 → 주문 전 일별조회 `baseline_ids` 저장 → `submitting` 주문과 요청 기록을 트랜잭션으로 저장 → POST 1회 → 접수번호 수신 시 `accepted` 순서다. 명시적 거절/전송 전 실패는 `rejected`, 전송 여부가 불확실하면 `unknown`이다. 같은 모드에 `unknown`/`submitting`이 있으면 새 주문을 막는다.
 
-주문번호가 없으면 `refresh`는 후보를 보여줄 뿐 자동 연결하지 않는다. `resolve_order`는 사용자가 확인한 번호를 종목·방향·수량·가격·날짜·기존 주문 중복과 대조하고 연결한다. 이 도구는 이미 번호가 있는 과거 취소 주문을 수동 확정하는 도구가 아니다.
+주문번호가 없으면 `refresh`는 후보를 보여줄 뿐 자동 연결하지 않는다. `resolve_order`는 사용자가 확인한 번호를 종목·방향·수량·가격·날짜·기존 주문 중복과 대조하고 연결한다. `resolve_order_not_submitted`는 사용자가 미접수를 확인한 경우 원래 범위를 새로 조회해 후보가 없을 때만 terminal `not_submitted`로 종결한다. 두 도구 모두 새 거래를 전송하지 않는다.
 
 ### 체결·취소 수량과 상태
 

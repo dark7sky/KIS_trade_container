@@ -5,15 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kis-trade-mcp"
 version = "0.1.0"
-description = "Private KIS trading MCP server"
+description = "Personal trading MCP server for KIS Korean stocks and Toss US stocks"
 requires-python = ">=3.12"
-dependencies = ["mcp>=1.26,<2", "httpx>=0.28,<1", "PyJWT[crypto]>=2.10,<3", "uvicorn>=0.34,<1", "filelock>=3.20,<4", "tzdata>=2025.2"]
+dependencies = ["mcp>=1.26,<2", "httpx>=0.28,<1", "PyJWT[crypto]>=2.15,<3", "uvicorn>=0.34,<1", "filelock>=3.20,<4", "tzdata>=2025.2"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10", "pytest-asyncio>=1,<2"]
 
 [project.scripts]
 kis-mcp = "kis_mcp.app:main"
+personal-trading-mcp = "kis_mcp.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

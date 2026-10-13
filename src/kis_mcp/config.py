@@ -29,6 +29,22 @@ class Credentials:
         return hashlib.sha256(f"{self.account}:{self.product}".encode()).hexdigest()
 
 
+@dataclass(frozen=True, repr=False)
+class TossCredentials:
+    client_id: str
+    secret: str
+    account: str
+
+    def validate(self):
+        if not self.client_id or not self.secret or not re.fullmatch(r"[0-9]+", self.account):
+            raise ValueError("Toss requires client ID, secret and numeric account sequence")
+
+    @property
+    def fingerprint(self):
+        # accountSeq is scoped to the client, not a globally unique account number.
+        return hashlib.sha256(f"toss:{self.client_id}:{self.account}".encode()).hexdigest()
+
+
 @dataclass(repr=False)
 class Settings:
     data_dir: Path
@@ -41,6 +57,7 @@ class Settings:
     poll_seconds: float = 10
     trusted_proxies: str = "127.0.0.1"
     allowed_origins: list[str] = field(default_factory=list)
+    toss_credentials: TossCredentials | None = None
 
     @classmethod
     def from_env(cls):
@@ -77,6 +94,13 @@ class Settings:
         interval = float(os.environ.get("ORDER_SUPERVISOR_INTERVAL_SECONDS") or "10")
         if not 1 <= interval <= 3600:
             raise ValueError("Polling interval must be between 1 and 3600 seconds")
+        toss_values = [
+            os.environ.get(name, "").strip()
+            for name in ("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET", "TOSS_ACCOUNT_SEQ")
+        ]
+        toss_credentials = TossCredentials(*toss_values) if any(toss_values) else None
+        if toss_credentials:
+            toss_credentials.validate()
         return cls(
             Path(required("DATA_DIR")),
             credentials,
@@ -92,4 +116,5 @@ class Settings:
                 for s in os.environ.get("MCP_ALLOWED_ORIGINS", "https://chatgpt.com").split(",")
                 if s.strip()
             ],
+            toss_credentials=toss_credentials,
         )

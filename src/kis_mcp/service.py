@@ -6,6 +6,11 @@ from .kis import KST, integer, number, today
 from .models import BrokerRejected, SubmissionNotSent, TradingError, UncertainSubmission
 
 PUBLIC_ORDER_FIELDS = (
+    "broker",
+    "currency",
+    "market",
+    "broker_status",
+    "rejected_quantity",
     "id",
     "client_request_id",
     "mode",
@@ -43,13 +48,20 @@ def same_id(left, right):
 
 
 class TradingService:
+    broker_name = "kis"
+
     def __init__(self, settings, store, broker):
         self.settings, self.store, self.broker = settings, store, broker
         self.lock = asyncio.Lock()
         self.last_poll = None
         self.poll_error = None
 
+    def orders(self):
+        return [o for o in self.store.orders() if o.get("broker", "kis") == "kis"]
+
     def check_account(self, order):
+        if order.get("broker", "kis") != "kis":
+            raise TradingError("Order belongs to another broker; use its tools")
         if self.settings.credentials[order["mode"]].fingerprint != order["account_fingerprint"]:
             raise TradingError(
                 "Configured account differs from the order's original account; restore its configuration"
@@ -82,7 +94,7 @@ class TradingService:
             "poll_error": self.poll_error,
             "pending_notifications": self.store.pending_count(),
             "unresolved_orders": [
-                o["id"] for o in self.store.orders() if o["status"] in ("unknown", "submitting")
+                o["id"] for o in self.orders() if o["status"] in ("unknown", "submitting")
             ],
         }
 
@@ -170,7 +182,7 @@ class TradingService:
             self.check_exchange(mode, request.exchange)
             if any(
                 o["mode"] == mode and o["status"] in ("unknown", "submitting")
-                for o in self.store.orders()
+                for o in self.orders()
             ):
                 raise TradingError(
                     "Resolve the account's uncertain submission before creating another order"
@@ -422,6 +434,8 @@ class TradingService:
     async def get_order(self, order_id):
         async with self.lock:
             order = self.store.get(order_id)
+            if order.get("broker", "kis") != self.broker_name:
+                raise TradingError("Order belongs to another broker; use its tools")
             if order["status"] not in ("rejected", "not_submitted"):
                 try:
                     order = await self.refresh(order)
@@ -467,7 +481,7 @@ class TradingService:
             "broker_orders": output,
             "mcp_orders": [
                 public_order(o)
-                for o in self.store.orders()
+                for o in self.orders()
                 if o["mode"] == mode
                 and start.strftime("%Y%m%d") <= o["date"] <= end.strftime("%Y%m%d")
             ],
@@ -547,7 +561,7 @@ class TradingService:
                 and o["date"] == order["date"]
                 and o["broker_id"]
                 and same_id(o["broker_id"], broker_id)
-                for o in self.store.orders()
+                for o in self.orders()
             ):
                 raise TradingError("Broker ID is already bound to another MCP order")
             row = matched[0]
@@ -601,7 +615,7 @@ class TradingService:
 
     async def poll(self):
         errors = 0
-        for snapshot in self.store.orders():
+        for snapshot in self.orders():
             if snapshot["status"] in (
                 "filled",
                 "cancelled",

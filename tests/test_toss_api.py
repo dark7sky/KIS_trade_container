@@ -5,22 +5,32 @@ import pytest
 
 from kis_mcp.config import TossCredentials
 from kis_mcp.models import BrokerRejected, SubmissionNotSent, TradingError, UncertainSubmission
-from kis_mcp.toss import Toss
+from kis_mcp.toss import Toss, decimal
 
 
 def client(handler):
-    return Toss(TossCredentials("test-client", "test-secret", "3"),
-                client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), interval=0)
+    return Toss(
+        TossCredentials("test-client", "test-secret", "3"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        interval=0,
+    )
 
 
 def token_response():
-    return httpx.Response(200, json={"access_token": "test-token", "token_type": "Bearer",
-                                    "expires_in": 86400})
+    return httpx.Response(
+        200, json={"access_token": "test-token", "token_type": "Bearer", "expires_in": 86400}
+    )
 
 
 def order():
-    return {"id": "b4d30471-90aa-4d86-b916-50d4c8e4c9c1", "symbol": "AAPL",
-            "side": "buy", "quantity": 5, "order_type": "limit", "price": "185.5"}
+    return {
+        "id": "b4d30471-90aa-4d86-b916-50d4c8e4c9c1",
+        "symbol": "AAPL",
+        "side": "buy",
+        "quantity": 5,
+        "order_type": "limit",
+        "price": "185.5",
+    }
 
 
 async def test_auth_and_order_contract():
@@ -35,9 +45,15 @@ async def test_auth_and_order_contract():
         assert req.headers["X-Tossinvest-Account"] == "3"
         assert req.headers["authorization"] == "Bearer test-token"
         body = json.loads(req.content)
-        assert body == {"clientOrderId": order()["id"], "symbol": "AAPL", "side": "BUY",
-                        "orderType": "LIMIT", "timeInForce": "DAY", "quantity": "5",
-                        "price": "185.5"}
+        assert body == {
+            "clientOrderId": order()["id"],
+            "symbol": "AAPL",
+            "side": "BUY",
+            "orderType": "LIMIT",
+            "timeInForce": "DAY",
+            "quantity": "5",
+            "price": "185.5",
+        }
         return httpx.Response(200, json={"result": {"orderId": "opaque-ID"}})
 
     api = client(handler)
@@ -119,10 +135,12 @@ async def test_pagination_open_closed_and_repeated_cursor_rejected():
         seen.append(dict(params))
         assert params["from"] == "2026-10-13" and params["to"] == "2026-10-13"
         if params["status"] == "OPEN":
-            return httpx.Response(200, json={"result": {"orders": [], "hasNext": False,
-                                                        "nextCursor": None}})
-        return httpx.Response(200, json={"result": {"orders": [], "hasNext": True,
-                                                    "nextCursor": "repeat"}})
+            return httpx.Response(
+                200, json={"result": {"orders": [], "hasNext": False, "nextCursor": None}}
+            )
+        return httpx.Response(
+            200, json={"result": {"orders": [], "hasNext": True, "nextCursor": "repeat"}}
+        )
 
     api = client(handler)
     try:
@@ -137,12 +155,159 @@ async def test_us_stock_metadata_prevents_domestic_route():
     def handler(req):
         if req.url.path == "/oauth2/token":
             return token_response()
-        return httpx.Response(200, json={"result": [{"symbol": "ABC123", "market": "KOSPI",
-                                                     "currency": "KRW", "status": "ACTIVE"}]})
+        return httpx.Response(
+            200,
+            json={
+                "result": [
+                    {"symbol": "ABC123", "market": "KOSPI", "currency": "KRW", "status": "ACTIVE"}
+                ]
+            },
+        )
 
     api = client(handler)
     try:
         with pytest.raises(TradingError, match="US"):
             await api.capacity("ABC123", "1")
+    finally:
+        await api.close()
+
+
+@pytest.mark.parametrize("value", [None, True, "-1", "NaN", "Infinity", "broken"])
+def test_invalid_numeric_response(value):
+    with pytest.raises(TradingError):
+        decimal(value)
+
+
+async def test_public_reads_filter_account_data_and_preserve_usd():
+    seen = []
+
+    def handler(req):
+        seen.append(req.url.path)
+        if req.url.path == "/oauth2/token":
+            return token_response()
+        data = {
+            "/api/v1/stocks": [
+                {"symbol": "AAPL", "market": "NASDAQ", "currency": "USD", "status": "ACTIVE"}
+            ],
+            "/api/v1/prices": [
+                {
+                    "symbol": "AAPL",
+                    "currency": "USD",
+                    "lastPrice": "185.50",
+                    "timestamp": "2026-10-13T22:30:00+09:00",
+                }
+            ],
+            "/api/v1/buying-power": {"currency": "USD", "cashBuyingPower": "1000.50"},
+            "/api/v1/sellable-quantity": {"sellableQuantity": "1.5"},
+            "/api/v1/holdings": {
+                "accountNumber": "private-account",
+                "items": [
+                    {
+                        "symbol": "AAPL",
+                        "marketCountry": "US",
+                        "currency": "USD",
+                        "quantity": "1.5",
+                        "accountNumber": "private-account",
+                    },
+                    {"symbol": "005930", "marketCountry": "KR", "currency": "KRW", "quantity": "2"},
+                ],
+            },
+            "/api/v1/market-calendar/US": {
+                key: {
+                    "date": "2026-10-13",
+                    "dayMarket": None,
+                    "preMarket": None,
+                    "afterMarket": None,
+                    "regularMarket": {
+                        "startTime": "2026-10-13T22:30:00+09:00",
+                        "endTime": "2026-10-14T05:00:00+09:00",
+                    },
+                }
+                for key in ("today", "previousBusinessDay", "nextBusinessDay")
+            },
+        }
+        return httpx.Response(200, json={"result": data[req.url.path]})
+
+    api = client(handler)
+    try:
+        quote = await api.quote("AAPL")
+        assert quote["price"] == "185.5" and quote["currency"] == "USD"
+        assert quote["broker_timestamp"] != quote["price_observed_at"]
+        account = await api.account()
+        assert len(account["holdings"]) == 1
+        assert "private-account" not in json.dumps(account)
+        assert account["cash_buy_amount"] == "1000.5"
+        assert (await api.capacity("AAPL", "185.5"))["sell_quantity"] == "1.5"
+        assert (await api.calendar())["today"]["regularMarket"]["endTime"].endswith("+09:00")
+        assert seen.count("/oauth2/token") == 1
+    finally:
+        await api.close()
+
+
+async def test_complete_pagination_and_opaque_detail_id():
+    def handler(req):
+        if req.url.path == "/oauth2/token":
+            return token_response()
+        if req.url.path == "/api/v1/orders/opaque-ID":
+            return httpx.Response(200, json={"result": {"orderId": "opaque-ID"}})
+        if req.url.params["status"] == "OPEN":
+            result = {"orders": [{"orderId": "open-ID"}], "hasNext": False, "nextCursor": None}
+        elif "cursor" not in req.url.params:
+            result = {
+                "orders": [{"orderId": "closed-ID-1"}],
+                "hasNext": True,
+                "nextCursor": "second",
+            }
+        else:
+            result = {"orders": [{"orderId": "closed-ID-2"}], "hasNext": False, "nextCursor": None}
+        return httpx.Response(200, json={"result": result})
+
+    api = client(handler)
+    try:
+        assert len(await api.orders("2026-10-13", "2026-10-13", "AAPL")) == 3
+        assert (await api.detail("opaque-ID"))["orderId"] == "opaque-ID"
+        with pytest.raises(TradingError):
+            await api.detail("../wrong-path")
+    finally:
+        await api.close()
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+async def test_explicit_rejection_is_sanitized(status):
+    def handler(req):
+        if req.url.path == "/oauth2/token":
+            return token_response()
+        return httpx.Response(
+            status, json={"error": {"code": "invalid-request", "message": "private"}}
+        )
+
+    api = client(handler)
+    try:
+        with pytest.raises(BrokerRejected) as caught:
+            await api.place(order())
+        assert "private" not in str(caught.value)
+    finally:
+        await api.close()
+
+
+async def test_query_failure_and_auth_cooldown():
+    fail_auth = False
+
+    def handler(req):
+        if req.url.path == "/oauth2/token":
+            return httpx.Response(403) if fail_auth else token_response()
+        return httpx.Response(500, text="private-error")
+
+    api = client(handler)
+    try:
+        with pytest.raises(TradingError, match="query failed"):
+            await api.detail("opaque-ID")
+        api.access_token = None
+        with pytest.raises(SubmissionNotSent, match="cooling down"):
+            await api.place(order())
+        api.auth_retry_at = 0
+        fail_auth = True
+        with pytest.raises(SubmissionNotSent, match="authentication failed"):
+            await api.place(order())
     finally:
         await api.close()

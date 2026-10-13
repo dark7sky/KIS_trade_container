@@ -39,6 +39,28 @@ class CancelInput(BaseModel):
     expected_mode: Mode | None = None
 
 
+class TossOrderInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    client_request_id: str = Field(min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_.:-]+$")
+    symbol: str = Field(min_length=1, max_length=20, pattern=r"^[A-Z][A-Z0-9.\-]*$")
+    side: Side
+    quantity: int = Field(gt=0, le=100000000, strict=True)
+    order_type: OrderType = "limit"
+    price: Decimal = Field(default=Decimal("0"), ge=0, le=1000000000, allow_inf_nan=False)
+    expected_mode: Literal["real"] = "real"
+
+    @model_validator(mode="after")
+    def price_valid(self):
+        if self.order_type == "market":
+            if self.price != 0:
+                raise ValueError("Market orders require price=0")
+        else:
+            tick = Decimal("0.0001") if self.price < 1 else Decimal("0.01")
+            if self.price <= 0 or self.price % tick:
+                raise ValueError("USD limit price requires 2 decimals, or 4 below $1")
+        return self
+
+
 class TradingError(Exception):
     """Only fixed, non-sensitive messages may be exposed to clients."""
 

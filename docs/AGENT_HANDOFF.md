@@ -1,10 +1,29 @@
-# KIS Trading MCP 에이전트 인계
+# Personal Trading MCP 에이전트 인계
 
-최종 문서 점검: 2026-09-19 (Asia/Seoul). 코드 기준: `28a1a63` 실전거래 안정화 배포 완료.
+최종 문서 점검: 2026-10-13 (Asia/Seoul). 로컬: 토스 미국주식 추가 검증 완료. 마지막 기록된 운영 배포: `28a1a63` (이번 작업에서 배포 상태 재확인 없음).
 이 문서는 대화 없이 작업을 이어가기 위한 지도다. 실행 시점의 Git·컨테이너·브로커 상태는 다시 확인해야 한다.
 실제 비밀값과 주문 식별자는 기록하지 않는다.
 
 ## 1. 현재 상태와 다음 작업
+
+### 2026-10-13 Personal Trading / 토스 미국주식 추가 (로컬 구현·검증 완료, 미배포)
+
+- MCP 표시 이름은 Personal Trading. 기존 KIS 도구와 OAuth client/scope, Python 패키지·배포 프로젝트·DB는 호환성을 위해 유지했다. 실행 별칭 personal-trading-mcp 추가.
+- 토스 전용 도구 10개: 계좌, USD 시세, 현금 매수가능액·매도가능수량, 미국 세션 시간표, 주문·목록·단건·잔량 전체 취소, 응답 유실 주문 연결·미접수 확정. 실전·정수 수량·DAY 지정가/시장가만 지원. 소수점 수량/금액·LOC·조건주문·정정·웹소켓은 미구현.
+- 새 파일: src/kis_mcp/toss.py(공식 OpenAPI 1.2.24 REST 어댑터), toss_service.py(미국주식 상태 처리). 기존 TradingService에는 증권사별 주문 필터와 잘못된 증권사 도구 차단을 추가했다. broker 없는 기존 주문은 KIS로 해석하며 저장된 KIS 요청 payload 형식은 변경하지 않았다.
+- 토스 설정 TOSS_CLIENT_ID / TOSS_CLIENT_SECRET / TOSS_ACCOUNT_SEQ는 모두 있을 때만 활성화, 일부만 있으면 기동 실패. 지문은 client ID+account sequence로 분리. demo에서 토스 새 주문·계좌·시세 조회 차단. 기존 주문 조회·취소·폴링은 원래 실전 계좌 기준.
+- 토스 주문 UUID를 clientOrderId로 보내지만 토스의 10분 멱등성 TTL에 의존하지 않는다. SQLite 영구 요청 기록, POST 자동 재전송 금지, unknown 수동 대조, 계좌 변경 차단 유지. 취소는 전체 잔량만 요청하며 별도 취소 자주문 번호를 저장한다. 부분체결·취소 경합 및 CANCEL_REJECTED를 재조회로 반영한다.
+- 미국 주문에 KIS의 한국시간 전일 만료 규칙을 적용하지 않는다. REPLACED/알 수 없는 상태는 needs_review. 원주문 상세만으로 종료 여부를 확정할 수 없는 PARTIAL_FILLED는 보수적으로 유지한다. 시장가 매수가능수량은 토스 API에 없어 보장하지 않으며 현금액 검사와 브로커 최종 심사를 사용한다. 수수료 포함 지정가 사전검사는 미구현.
+- 검증: RED 체크포인트 61ce0f5, 2f9fabf. 전체 pytest 154 passed, 제외 없음. 전체 커버리지 87%, toss.py 93%, toss_service.py 90%. 기존 정지 이력의 MCP HTTP 테스트는 TestClient 대신 ASGITransport + 명시적 lifespan의 비동기 테스트로 전환해 통과했다. 가짜 브로커·임시 DB만 사용.
+- 감사에서 PyJWT 2.14.0의 PYSEC-2026-4141/4183 발견 후 2.15.0으로 갱신했다. requirements.lock 감사 취약점 없음, pip check 통과. 변경 Python 파일 ruff와 git diff --check 통과. 저장소 전체 ruff에는 기존 test_compose_logging_driver.py의 import 공백 경고가 남아 있으며 해당 파일은 변경하지 않았다.
+- Docker CLI가 로컬에 없어 compose config --quiet 및 이미지 빌드/컨테이너 검증은 실행하지 못했다. 현재 검증은 Python/ASGI 수준이다. 실제 토스 인증·계좌 API, 주문·취소·모드 변경, 운영 DB 접근은 수행하지 않았다.
+- 푸시·운영 배포는 수행하지 않았다. 사용자 승인 후 README의 토스 키/계좌 식별값/외부 허용 IP 설정 및 Docker VM 빌드·재기동·health·파일 해시·공개 healthz/미인증 MCP 401 검증이 필요하다. 기존 사용자 원격 제어 문서 변경은 커밋에서 제외하고 작업 트리에 보존한다.
+
+### 2026-10-13 토스증권 API 연동 가능성 검토
+
+- 사용자 질문에 대한 읽기 검토만 수행했다. 공식 가이드(https://developers.tossinvest.com/)에서 국내·미국 주식 시세, 계좌·보유 주식, 주문·정정·취소, 웹소켓 지원을 확인했다.
+- 기존 MCP·저장소 구조는 재사용 가능하지만 `service.py`의 KIS 주문 필드와 상태 해석을 공통 모델로 분리하고 토스 어댑터를 구현해야 한다. API 주소·키 교체만으로 호환되지 않는다.
+- 토스 연동 코드 구현, API 인증·계좌 호출, 실제 주문, 테스트, 커밋·푸시·배포는 수행하지 않았다. 기존 미커밋 문서 변경은 보존했다.
 
 ### 2026-09-19 실전 AI 클라이언트용 MCP 안정화 (배포 완료)
 

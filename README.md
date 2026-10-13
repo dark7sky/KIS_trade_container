@@ -1,22 +1,26 @@
-# KIS Trading MCP
+# Personal Trading MCP
 
 개발·작업 인계는 [에이전트 시작 안내](AGENTS.md)와 [구조·알고리즘·운영 인계 문서](docs/AGENT_HANDOFF.md)를 먼저 참고하세요.
 
-ChatGPT 웹에서 개인 한국투자증권 계좌를 조회하고 국내주식 현금 주문을 전송하는 MCP 서버입니다. Python MCP SDK의 Streamable HTTP, Keycloak OAuth, SQLite 주문 이력, Telegram 체결 알림을 사용합니다.
+ChatGPT 웹에서 한국투자증권의 국내주식과 토스증권의 미국주식을 조회하고 현금 주문을 전송하는 개인용 MCP 서버입니다. Python MCP SDK의 Streamable HTTP, Keycloak OAuth, SQLite 주문 이력, Telegram 체결 알림을 사용합니다.
+
+MCP 표시 이름은 `Personal Trading`입니다. 기존 설치와 OAuth 연결을 보존하기 위해 Python 패키지 `kis_mcp`, 배포 프로젝트 `kis-trade`, OAuth client/scope 이름은 유지합니다. 실행 명령은 `personal-trading-mcp`와 기존 `kis-mcp` 모두 지원합니다.
 
 ## 거래 동작
 
-- **처음 시작하면 실전(real)** 입니다. `set_mode("demo")`로 모의투자 전환 후 사용하세요. 모드는 모든 대화가 공유하고 재시작 후에도 유지됩니다.
+- **처음 시작하면 실전(real)** 입니다. 모드는 모든 대화가 공유하고 재시작 후에도 유지됩니다. `demo`는 KIS 모의투자만 지원하며 토스의 새 주문·계좌·시세 조회는 차단합니다. 기존 토스 주문의 조회·취소·상태 추적은 원래 실전 계좌를 사용합니다.
 - `place_order`, `cancel_order`는 검증 후 즉시 전송합니다. `LIVE_TRADING_ENABLED`, `KIS_ENV`, `OPENAI_*`, `AUTO_TRADE_*`는 사용하지 않습니다.
 - 전략 구성, 위험한도, 손익 제한, 종목·수량 판단은 이 MCP 서버 밖의 클라이언트가 담당합니다. 이 서버는 증권 정보, 계좌 정보, 주문·취소 실행과 그 결과 추적에 집중합니다.
-- 실전 KRX/NXT, 모의 KRX의 지정가·시장가 주문만 지원합니다. NXT 모의투자, 신용·미수·공매도·SOR·자동매매·주문 정정은 지원하지 않습니다.
-- 현금 매수가능수량과 금액을 모두 확인합니다. 시장가 수량은 KIS가 계산한 미수 없는 시장가 주문가능수량으로 제한합니다. 외부 HTS/MTS의 동시 주문·출금까지 서버가 잠글 수는 없으므로 계좌 자체도 증거금 100%/미수 미사용 설정을 권합니다.
+- KIS는 실전 KRX/NXT, 모의 KRX의 지정가·시장가 주문을 지원합니다. 토스는 미국주식 실전 정수 수량의 지정가·시장가 DAY 주문과 잔량 전체 취소를 지원합니다. 토스 소수점 수량·금액 주문, 조건주문, LOC, 주문 정정은 이번 구현 범위에 포함되지 않습니다. 신용·공매도·자동 전략은 제공하지 않습니다.
+- KIS는 현금 매수가능수량과 금액을 모두 확인합니다. 토스는 USD 현금 매수가능금액과 매도가능수량을 확인하며, 시장가 매수가능수량 API가 없으므로 확정 수량을 계산하지 않습니다. 지정가 금액 사전 검사는 수수료를 포함하지 않으며, 수수료·실시간 시장가·주문 가능 여부는 토스의 최종 심사를 따릅니다. 외부 HTS/MTS의 동시 주문·출금까지 서버가 잠글 수는 없습니다.
 - 가격·시간·거래소별 종목 적격성의 최종 판단은 KIS가 수행합니다. 거절 시 다른 시장·계좌·주문 유형으로 자동 재주문하지 않습니다.
 - `accepted`는 접수 성공이지 체결 완료가 아닙니다. `get_order` 또는 Telegram으로 체결을 확인합니다.
 - `remaining`은 만료분을 제외한 주문 잔량이며 현재 취소가능수량을 보장하지는 않습니다. 일별조회 원본 잔량은 `broker_remaining`, 만료수량은 `expired`로 구분합니다. 지원 중인 KRX/NXT 지정가·시장가 주문은 한국시간으로 주문일이 지난 뒤 일별 내역 조회에 성공하고 수량이 일치하면 남은 수량을 `expired`로 처리합니다. 부분체결·직접 취소 수량은 보존하며 만료를 취소 완료 알림으로 보내지 않습니다. 당일 세션 종료 시각에 따른 즉시 만료는 아직 지원하지 않습니다.
 - Telegram은 **이 MCP에서 만든 주문의 체결·취소 완료만** 알립니다. 부분체결은 새로 관측한 수량과 해당 구간 평균가로 알립니다. 폴링 사이 여러 체결이 합쳐질 수 있습니다.
 
 ## 도구
+
+아래 기존 이름의 도구는 KIS 국내주식 전용입니다. `get_status`는 KIS와 토스의 구성 상태를 함께 반환하며 `set_mode`는 공통 모드를 바꿉니다.
 
 | 도구 | 주요 입력 / 역할 |
 | --- | --- |
@@ -38,6 +42,39 @@ ChatGPT 웹에서 개인 한국투자증권 계좌를 조회하고 국내주식 
 `get_order`와 `cancel_order`는 현재 모드가 아닌 **주문의 원래 계좌**를 사용합니다. 계좌번호 설정이 바뀌면 기존 주문에 접근하지 않고 오류를 반환합니다.
 
 `get_account`와 `get_quote`는 `price_observed_at`을 KST 오프셋이 포함된 ISO-8601 형식으로 반환합니다. `get_quote`는 `component_observations.price.received_at`과 `component_observations.orderbook.received_at`도 함께 반환합니다. `price_time_basis` 또는 구성 요소의 `time_basis`가 `server_received_at`이면 이는 서버가 KIS 응답을 받은 시각이며 거래소의 마지막 체결시각은 아닙니다. 잔고의 `prpr`와 별도 현재가 `price`는 서로 다른 KIS 조회 스냅샷이므로, 가격 차이를 판단할 때 값과 관측시각을 함께 비교해야 합니다.
+
+## 토스증권 미국주식
+
+| 도구 | 주요 입력 / 역할 |
+| --- | --- |
+| `toss_get_account` | 미국주식 보유수량·평균매입가·평가가격과 USD 현금 매수가능액 |
+| `toss_get_quote` | `symbol`: 미국 티커, 현재가 USD와 관측시각 |
+| `toss_get_order_capacity` | `symbol`: USD 현금 매수가능액·매도가능수량 |
+| `toss_get_market_calendar` | 전일·당일·익일 영업일 세션, 휴장·서머타임을 반영한 브로커 시간표 |
+| `toss_place_order` | `client_request_id`, `symbol`, `side`, 정수 `quantity`, `order_type`, USD `price` |
+| `toss_list_orders` | `start_date`, `end_date`: 최근 90일, 주문 생성일의 **한국시간** 기준 |
+| `toss_get_order` | `order_id`: 이 MCP가 반환한 토스 주문 UUID |
+| `toss_cancel_order` | 새 `client_request_id`, `order_id`: 미체결 잔량 **전체** 취소 |
+| `toss_resolve_order` | `order_id`, `broker_id`: 사용자가 토스에서 확인한 응답 유실 주문 연결 |
+| `toss_resolve_order_not_submitted` | `order_id`: 사용자가 미접수를 확인한 응답 유실 주문 종결 |
+
+미국 티커는 대문자로 입력합니다(예: `AAPL`, `BRK.B`). 실제 종목 메타데이터에서 미국 시장·USD 여부를 확인하므로 영문 종목코드의 국내주식으로 잘못 주문하지 않습니다. 지정가 가격은 $1 이상 소수 둘째 자리, $1 미만 넷째 자리까지 허용하며 초과 자릿수는 조용히 절삭하지 않고 거부합니다. 시장가는 `price=0`입니다. 정수 수량만 주문하지만 보유·매도가능수량 조회에는 기존 소수점 주식도 표시됩니다.
+
+토스 설정은 선택 사항입니다. `.env`에 다음 세 값을 모두 설정하면 활성화되고 모두 비어 있으면 KIS만 동작합니다. 일부만 설정하면 시작 시 오류로 중단합니다.
+
+- `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`: 토스증권 웹 설정 → Open API에서 발급합니다.
+- `TOSS_ACCOUNT_SEQ`: 공식 `GET /api/v1/accounts` 응답의 본인 계좌 식별값입니다. 인쇄된 계좌번호가 아닙니다.
+- 토스 웹의 허용 IP 목록에 **컨테이너가 인터넷으로 나갈 때 사용하는 외부 IP**를 등록합니다.
+
+키는 배포 서버의 `.env`에만 보관합니다. `get_status`의 `brokers.toss.enabled`는 설정 유무이며 인증 성공을 의미하지 않습니다. 실제 API 인증·계좌 조회·실전 주문은 별도 운영 검증 대상입니다. 토스 모의 거래로 대체하거나 KIS 계좌로 자동 전환하지 않습니다.
+
+주문은 증권사·통화·계좌 지문을 저장하고 원래 증권사에서만 복구·취소합니다. 요청 ID는 두 증권사 전체에서 중복 사용을 검사합니다. 토스 `clientOrderId`에는 MCP 주문 UUID를 보내지만 공식 멱등성 보장은 10분뿐이므로, SQLite 요청 기록을 계속 유지하고 POST를 자동 재전송하지 않습니다. `unknown`은 새 요청 ID로 재주문하지 말고 토스 내역과 대조합니다. 후보가 하나여도 자동 연결하지 않습니다.
+
+취소 응답의 ID는 취소 자주문 ID이며 원주문 ID를 덮어쓰지 않습니다. `accepted`는 취소 접수일 뿐입니다. 원주문이 취소·전량체결·거절로 종결되거나 취소 자주문의 `CANCEL_REJECTED`가 확인될 때 취소 요청 결과를 갱신합니다. 응답이 유실된 취소는 임의 재전송하지 않습니다. 외부 정정(`REPLACED` 등)이나 알려지지 않은 상태는 `needs_review`로 남깁니다. 해당 상태에서는 토스 새 주문을 차단하며 원주문을 다른 주문에 자동 연결하지 않습니다.
+
+한국시간 자정이나 로컬 장 종료 계산만으로 미국 주문을 만료 처리하지 않습니다. 토스의 주문 상세 응답으로 체결·취소를 확인합니다. 상세 응답이 부분체결만 나타내고 종료 증거가 없으면 잔량 상태를 보수적으로 유지합니다. 상태 추적은 REST 폴링이며 웹소켓은 이번 구현에 포함되지 않습니다. 알림은 `[실전 TOSS US]` 및 USD 금액으로 구분합니다.
+
+구현 기준: [토스 공식 API 가이드](https://developers.tossinvest.com/), [공식 OpenAPI 명세](https://openapi.tossinvest.com/openapi-docs/latest/openapi.json) 버전 `1.2.24`(2026-10-13 확인).
 
 ## 설치 및 설정
 

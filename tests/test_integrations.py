@@ -6,7 +6,6 @@ import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from starlette.testclient import TestClient
 
 from kis_mcp.app import create_app, public_error, runtime_health
 from kis_mcp.auth import KeycloakVerifier
@@ -70,7 +69,7 @@ async def test_oauth_verifier(settings, rsa_keys, changes):
     await verifier.close()
 
 
-def test_mcp_http_auth_initialization_tools_and_call(settings, rsa_keys, broker):
+async def test_mcp_http_auth_initialization_tools_and_call(settings, rsa_keys, broker):
     key, jwk = rsa_keys
     verifier = KeycloakVerifier(
         settings,
@@ -79,76 +78,77 @@ def test_mcp_http_auth_initialization_tools_and_call(settings, rsa_keys, broker)
         ),
     )
     app = create_app(settings, broker=broker, verifier=verifier)
-    with TestClient(app, base_url=settings.public_url) as client:
-        assert client.get("/healthz").status_code == 200
-        meta = client.get("/.well-known/oauth-protected-resource/mcp")
-        assert meta.status_code == 200
-        assert meta.json()["resource"] == settings.public_url + "/mcp"
-        headers = {
-            "Accept": "application/json, text/event-stream",
-            "Content-Type": "application/json",
-        }
-        request = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": {"name": "test", "version": "1"},
-            },
-        }
-        unauthorized = client.post("/mcp", headers=headers, json=request)
-        assert unauthorized.status_code == 401
-        assert "resource_metadata" in unauthorized.headers["www-authenticate"]
-        headers["Authorization"] = "Bearer " + signed(settings, key)
-        assert client.post("/mcp", headers=headers, json=request).status_code == 200
-        headers["MCP-Protocol-Version"] = "2025-11-25"
-        response = client.post(
-            "/mcp",
-            headers=headers,
-            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
-        )
-        tools = {t["name"]: t for t in response.json()["result"]["tools"]}
-        assert len(tools) == 11
-        assert tools["place_order"]["annotations"]["destructiveHint"] is True
-        assert tools["place_order"]["_meta"]["securitySchemes"][0]["type"] == "oauth2"
-        response = client.post(
-            "/mcp",
-            headers=headers,
-            json={
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=settings.public_url
+        ) as client:
+            assert (await client.get("/healthz")).status_code == 200
+            meta = await client.get("/.well-known/oauth-protected-resource/mcp")
+            assert meta.status_code == 200
+            assert meta.json()["resource"] == settings.public_url + "/mcp"
+            headers = {
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            }
+            request = {
                 "jsonrpc": "2.0",
-                "id": 3,
-                "method": "tools/call",
-                "params": {"name": "set_mode", "arguments": {"mode": "demo"}},
-            },
-        )
-        assert response.status_code == 200
-        assert not response.json()["result"].get("isError"), response.json()
-        assert json.loads(response.json()["result"]["content"][0]["text"])["mode"] == "demo"
-        response = client.post(
-            "/mcp",
-            headers=headers,
-            json={
-                "jsonrpc": "2.0",
-                "id": 4,
-                "method": "tools/call",
-                "params": {"name": "get_status", "arguments": {}},
-            },
-        )
-        assert json.loads(response.json()["result"]["content"][0]["text"])["mode"] == "demo"
-        assert (
-            client.post(
-                "/mcp", headers=headers | {"Origin": "https://evil.test"}, json=request
-            ).status_code
-            == 403
-        )
-        assert (
-            client.post("/mcp", headers=headers | {"Host": "evil.test"}, json=request).status_code
-            == 421
-        )
-        headers["Authorization"] = "Bearer " + signed(settings, key, sub="someone-else")
-        assert client.post("/mcp", headers=headers, json=request).status_code == 401
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            }
+            unauthorized = await client.post("/mcp", headers=headers, json=request)
+            assert unauthorized.status_code == 401
+            assert "resource_metadata" in unauthorized.headers["www-authenticate"]
+            headers["Authorization"] = "Bearer " + signed(settings, key)
+            assert (await client.post("/mcp", headers=headers, json=request)).status_code == 200
+            headers["MCP-Protocol-Version"] = "2025-11-25"
+            response = await client.post(
+                "/mcp",
+                headers=headers,
+                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            )
+            tools = {t["name"]: t for t in response.json()["result"]["tools"]}
+            assert len(tools) == 21
+            assert tools["place_order"]["annotations"]["destructiveHint"] is True
+            assert tools["place_order"]["_meta"]["securitySchemes"][0]["type"] == "oauth2"
+            response = await client.post(
+                "/mcp",
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "set_mode", "arguments": {"mode": "demo"}},
+                },
+            )
+            assert response.status_code == 200
+            assert not response.json()["result"].get("isError"), response.json()
+            assert json.loads(response.json()["result"]["content"][0]["text"])["mode"] == "demo"
+            response = await client.post(
+                "/mcp",
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {"name": "get_status", "arguments": {}},
+                },
+            )
+            assert json.loads(response.json()["result"]["content"][0]["text"])["mode"] == "demo"
+            assert (
+                await client.post(
+                    "/mcp", headers=headers | {"Origin": "https://evil.test"}, json=request
+                )
+            ).status_code == 403
+            assert (
+                await client.post("/mcp", headers=headers | {"Host": "evil.test"}, json=request)
+            ).status_code == 421
+            headers["Authorization"] = "Bearer " + signed(settings, key, sub="someone-else")
+            assert (await client.post("/mcp", headers=headers, json=request)).status_code == 401
     assert not broker.placed
 
 

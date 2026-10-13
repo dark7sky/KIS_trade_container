@@ -7,14 +7,23 @@ from pydantic import ValidationError
 
 from kis_mcp.config import TossCredentials
 from kis_mcp.models import OrderInput, TossOrderInput, TradingError, UncertainSubmission
-from kis_mcp.service import TradingService
 from kis_mcp.store import Store
 from kis_mcp.toss_service import TossTradingService
 
 
 def request(**changes):
-    return TossOrderInput(**({"client_request_id": "toss-request-1", "symbol": "AAPL",
-                             "side": "buy", "quantity": 5, "price": "185.50"} | changes))
+    return TossOrderInput(
+        **(
+            {
+                "client_request_id": "toss-request-1",
+                "symbol": "AAPL",
+                "side": "buy",
+                "quantity": 5,
+                "price": "185.50",
+            }
+            | changes
+        )
+    )
 
 
 class FakeToss:
@@ -45,11 +54,17 @@ class FakeToss:
         self.placed.append(deepcopy(order))
         broker_id = "toss-order-" + str(len(self.placed))
         self.rows[broker_id] = {
-            "orderId": broker_id, "symbol": order["symbol"], "side": order["side"].upper(),
-            "orderType": order["order_type"].upper(), "timeInForce": "DAY", "status": "PENDING",
-            "quantity": str(order["quantity"]), "price": order["price"], "currency": "USD",
-            "orderedAt": order["created_at"], "execution": {"filledQuantity": "0",
-            "averageFilledPrice": None, "filledAmount": None},
+            "orderId": broker_id,
+            "symbol": order["symbol"],
+            "side": order["side"].upper(),
+            "orderType": order["order_type"].upper(),
+            "timeInForce": "DAY",
+            "status": "PENDING",
+            "quantity": str(order["quantity"]),
+            "price": order["price"],
+            "currency": "USD",
+            "orderedAt": order["created_at"],
+            "execution": {"filledQuantity": "0", "averageFilledPrice": None, "filledAmount": None},
         }
         if self.place_error:
             raise self.place_error
@@ -60,7 +75,9 @@ class FakeToss:
         if self.cancel_error:
             raise self.cancel_error
         self.rows["cancel-child"] = deepcopy(self.rows[order["broker_id"]]) | {
-            "orderId": "cancel-child", "status": "PENDING_CANCEL"}
+            "orderId": "cancel-child",
+            "status": "PENDING_CANCEL",
+        }
         return {"broker_id": "cancel-child"}
 
     async def close(self):
@@ -84,8 +101,16 @@ def test_accept_dollar_prices(price):
     assert request(price=price).price == Decimal(price)
 
 
-@pytest.mark.parametrize("changes", [{"quantity": 0.5}, {"quantity": True}, {"symbol": "005930"},
-                                    {"symbol": "../AAPL"}, {"order_type": "market", "price": "1"}])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"quantity": 0.5},
+        {"quantity": True},
+        {"symbol": "005930"},
+        {"symbol": "../AAPL"},
+        {"order_type": "market", "price": "1"},
+    ],
+)
 def test_reject_unsupported_orders(changes):
     with pytest.raises(ValidationError):
         request(**changes)
@@ -115,8 +140,11 @@ async def test_unknown_blocks_only_toss_and_never_reposts(toss, service):
     assert (await toss.place(request()))["id"] == order["id"]
     with pytest.raises(TradingError, match="uncertain"):
         await toss.place(request(client_request_id="toss-request-2"))
-    kis = await service.place(OrderInput(client_request_id="kis-request-1", symbol="005930",
-                                        side="buy", quantity=1, price=1000))
+    kis = await service.place(
+        OrderInput(
+            client_request_id="kis-request-1", symbol="005930", side="buy", quantity=1, price=1000
+        )
+    )
     assert kis["status"] == "accepted"
     await service.poll()
     assert service.poll_error is None
@@ -130,16 +158,20 @@ async def test_unknown_blocks_only_toss_and_never_reposts(toss, service):
 async def test_partial_fill_cancel_race_notifications_and_restart(toss, service, settings):
     order = await toss.place(request())
     row = toss.broker.rows[order["broker_id"]]
-    row.update(status="PARTIAL_FILLED", execution={"filledQuantity": "2",
-               "averageFilledPrice": "185.25", "filledAmount": "370.50"})
+    row.update(
+        status="PARTIAL_FILLED",
+        execution={"filledQuantity": "2", "averageFilledPrice": "185.25", "filledAmount": "370.50"},
+    )
     partial = await toss.get_order(order["id"])
     assert (partial["filled"], partial["remaining"]) == (2, 3)
     result = await toss.cancel("toss-cancel-1", order["id"])
     assert result["status"] == "accepted"
     with pytest.raises(TradingError, match="reconciled"):
         await toss.cancel("toss-cancel-2", order["id"])
-    row.update(status="CANCELED", execution={"filledQuantity": "3",
-               "averageFilledPrice": "185.25", "filledAmount": "555.75"})
+    row.update(
+        status="CANCELED",
+        execution={"filledQuantity": "3", "averageFilledPrice": "185.25", "filledAmount": "555.75"},
+    )
     service.store.close()
     reopened = Store(settings.data_dir)
     service.store = reopened
@@ -147,7 +179,11 @@ async def test_partial_fill_cancel_race_notifications_and_restart(toss, service,
     await resumed.poll()
     final = await resumed.get_order(order["id"])
     assert (final["status"], final["filled"], final["cancelled"], final["remaining"]) == (
-        "cancelled", 3, 2, 0)
+        "cancelled",
+        3,
+        2,
+        0,
+    )
     assert (await resumed.cancel("toss-cancel-1", order["id"]))["cancelled_quantity"] == 2
     messages = reopened.pending_messages()
     assert len(messages) == 3
@@ -233,3 +269,65 @@ async def test_replaced_order_is_reviewed_not_treated_as_cancelled(toss):
     assert current["status"] == "needs_review" and current["cancelled"] == 0
     with pytest.raises(TradingError):
         await toss.cancel("toss-cancel-1", order["id"])
+
+
+@pytest.mark.parametrize(
+    "state,filled,expected",
+    [
+        ("FILLED", 5, "filled"),
+        ("REJECTED", 2, "rejected"),
+        ("NEW_UNKNOWN_STATUS", 0, "needs_review"),
+    ],
+)
+async def test_broker_terminal_and_unknown_states(toss, state, filled, expected):
+    order = await toss.place(request())
+    row = toss.broker.rows[order["broker_id"]]
+    row.update(
+        status=state,
+        execution={
+            "filledQuantity": str(filled),
+            "averageFilledPrice": "185.25",
+            "filledAmount": str(Decimal("185.25") * filled),
+        },
+    )
+    current = await toss.get_order(order["id"])
+    assert current["status"] == expected
+    if expected == "rejected":
+        assert current["rejected_quantity"] == 3 and current["filled"] == 2
+
+
+async def test_cancel_fill_race_resolves_not_cancelled(toss):
+    order = await toss.place(request())
+    await toss.cancel("toss-cancel-1", order["id"])
+    toss.broker.rows[order["broker_id"]].update(
+        status="FILLED",
+        execution={"filledQuantity": "5", "averageFilledPrice": "185.25", "filledAmount": "926.25"},
+    )
+    await toss.get_order(order["id"])
+    result = await toss.cancel("toss-cancel-1", order["id"])
+    assert result["status"] == "not_cancelled" and result["cancelled_quantity"] == 0
+
+
+async def test_toss_history_excludes_korean_orders_and_private_fields(toss):
+    order = await toss.place(request())
+    toss.broker.rows[order["broker_id"]]["accountNumber"] = "private"
+    toss.broker.rows["korean"] = {"currency": "KRW"}
+    date = order["created_at"][:10]
+    result = await toss.list_orders(date, date)
+    assert len(result["broker_orders"]) == 1 and len(result["mcp_orders"]) == 1
+    assert "accountNumber" not in result["broker_orders"][0]
+    with pytest.raises(TradingError):
+        await toss.list_orders("not-a-date", date)
+    with pytest.raises(TradingError):
+        await toss.list_orders("2000-01-01", date)
+
+
+async def test_disabled_service_and_no_capacity(toss, settings):
+    settings.toss_credentials = None
+    with pytest.raises(TradingError, match="not configured"):
+        await toss.place(request())
+    settings.toss_credentials = TossCredentials("test-client", "test-secret", "3")
+    with pytest.raises(TradingError, match="capacity"):
+        await toss.place(request(quantity=1000))
+    with pytest.raises(TradingError, match="holdings"):
+        await toss.place(request(side="sell", quantity=11))

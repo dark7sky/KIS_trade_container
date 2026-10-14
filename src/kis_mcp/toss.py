@@ -7,7 +7,7 @@ Credentials and broker error bodies never enter public errors or persisted state
 import asyncio
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
@@ -50,6 +50,7 @@ class Toss:
         self.client = client or httpx.AsyncClient(timeout=20, follow_redirects=False)
         self.interval = interval
         self.lock = asyncio.Lock()
+        self.auth_lock = asyncio.Lock()
         self.next_call = 0
         self.auth_retry_at = 0
         self.access_token = None
@@ -60,6 +61,10 @@ class Toss:
         await self.client.aclose()
 
     async def token(self):
+        async with self.auth_lock:
+            return await self._token_locked()
+
+    async def _token_locked(self):
         if self.access_token and time.monotonic() < self.expires_at:
             return self.access_token
         if time.monotonic() < self.auth_retry_at:
@@ -88,8 +93,9 @@ class Toss:
             self.health["real"] = "authentication_failed"
             raise SubmissionNotSent("Toss authentication failed; request not sent") from None
 
-    async def call(self, path, *, params=None, body=None, account=False):
-        write = body is not None
+    async def call(self, path, *, params=None, body=None, account=False, method=None):
+        method = method or ("POST" if body is not None else "GET")
+        write = method != "GET"
         async with self.lock:
             token = await self.token()
             await asyncio.sleep(max(0, self.next_call - time.monotonic()))
@@ -99,7 +105,7 @@ class Toss:
             self.next_call = time.monotonic() + self.interval
             try:
                 response = await self.client.request(
-                    "POST" if write else "GET",
+                    method,
                     "https://openapi.tossinvest.com" + path,
                     headers=headers,
                     params=params,
@@ -116,6 +122,9 @@ class Toss:
                             "Toss rejected request; verify inputs and account settings"
                         )
                 response.raise_for_status()
+                if response.status_code == 204 and method == "DELETE":
+                    self.health["real"] = "ok"
+                    return {}
                 data = response.json()
                 if not isinstance(data, dict) or "result" not in data or "error" in data:
                     raise ValueError
@@ -214,6 +223,29 @@ class Toss:
             "component_observations": {"balance": observed, "buying_power": observation()},
         }
 
+    async def commission_rate(self):
+        rows = await self.call("/api/v1/commissions", account=True)
+        if not isinstance(rows, list):
+            raise TradingError("Invalid Toss commission response")
+        today = datetime.now(KST).date()
+        active = []
+        for row in rows:
+            if not isinstance(row, dict) or row.get("marketCountry") != "US":
+                continue
+            try:
+                start = date.fromisoformat(row["startDate"]) if row.get("startDate") else None
+                end = date.fromisoformat(row["endDate"]) if row.get("endDate") else None
+                if (start is None or start <= today) and (end is None or today <= end):
+                    rate = decimal(row.get("commissionRate"))
+                    if rate > 1:
+                        raise ValueError
+                    active.append(rate)
+            except (ValueError, TypeError, TradingError):
+                raise TradingError("Invalid Toss commission response") from None
+        if len(active) != 1:
+            raise TradingError("Current Toss US commission unavailable or ambiguous")
+        return money(active[0])
+
     async def calendar(self):
         data = await self.call("/api/v1/market-calendar/US")
         # Only public market session fields; never pass through an arbitrary broker envelope.
@@ -291,3 +323,77 @@ class Toss:
     async def cancel(self, order):
         path = "/api/v1/orders/" + quote(identity(order["broker_id"]), safe="") + "/cancel"
         return self.receipt(await self.call(path, body={}, account=True))
+
+    async def candles(self, symbol, count=8):
+        page = await self.call(
+            "/api/v1/candles",
+            params={"symbol": symbol, "interval": "1m", "count": count},
+        )
+        if not isinstance(page, dict) or not isinstance(page.get("candles"), list):
+            raise TradingError("Invalid Toss candle response")
+        result = []
+        for candle in page["candles"]:
+            try:
+                if candle["currency"] != "USD":
+                    raise ValueError
+                stamp = datetime.fromisoformat(candle["timestamp"])
+                if stamp.tzinfo is None:
+                    raise ValueError
+                item = {
+                    "timestamp": stamp.isoformat(),
+                    "open": money(candle["openPrice"]),
+                    "high": money(candle["highPrice"]),
+                    "low": money(candle["lowPrice"]),
+                    "close": money(candle["closePrice"]),
+                    "volume": money(candle["volume"]),
+                }
+                if decimal(item["high"]) < decimal(item["low"]):
+                    raise ValueError
+                result.append(item)
+            except (KeyError, TypeError, ValueError, TradingError):
+                raise TradingError("Invalid Toss candle response") from None
+        return result
+
+    async def create_oco(self, payload):
+        result = await self.call("/api/v1/conditional-orders", body=payload, account=True)
+        try:
+            return identity(result["conditionalOrderId"])
+        except (KeyError, TypeError, TradingError):
+            raise UncertainSubmission("Toss conditional order ID missing; do not resubmit") from None
+
+    async def conditional_detail(self, broker_id):
+        return await self.call(
+            "/api/v1/conditional-orders/" + quote(identity(broker_id), safe=""), account=True
+        )
+
+    async def conditional_orders(self, symbol):
+        rows = {}
+        for status in ("OPEN", "CLOSED"):
+            params = {"status": status, "symbol": symbol, "limit": 100}
+            cursors = set()
+            for _ in range(200):
+                page = await self.call("/api/v1/conditional-orders", params=params, account=True)
+                if not isinstance(page, dict) or not isinstance(page.get("conditionalOrders"), list) or type(page.get("hasNext")) is not bool:
+                    raise TradingError("Invalid Toss conditional pagination")
+                for item in page["conditionalOrders"]:
+                    row_id = identity(item.get("conditionalOrderId"))
+                    if row_id in rows and rows[row_id] != item:
+                        raise TradingError("Toss conditional list changed during pagination")
+                    rows[row_id] = item
+                if not page["hasNext"]:
+                    break
+                cursor = page.get("nextCursor")
+                if not isinstance(cursor, str) or not cursor or cursor in cursors:
+                    raise TradingError("Incomplete Toss conditional pagination")
+                cursors.add(cursor)
+                params["cursor"] = cursor
+            else:
+                raise TradingError("Toss conditional pagination limit exceeded")
+        return list(rows.values())
+
+    async def cancel_conditional(self, broker_id):
+        return await self.call(
+            "/api/v1/conditional-orders/" + quote(identity(broker_id), safe=""),
+            account=True,
+            method="DELETE",
+        )

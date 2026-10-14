@@ -112,7 +112,10 @@ async def test_mcp_http_auth_initialization_tools_and_call(settings, rsa_keys, b
                 json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
             )
             tools = {t["name"]: t for t in response.json()["result"]["tools"]}
-            assert len(tools) == 21
+            assert len(tools) == 36
+            assert tools["toss_place_guarded_order"]["annotations"]["destructiveHint"] is True
+            assert tools["toss_estimate_entry_cost"]["annotations"]["readOnlyHint"] is True
+            assert tools["toss_get_stream_status"]["annotations"]["readOnlyHint"] is True
             assert tools["place_order"]["annotations"]["destructiveHint"] is True
             assert tools["place_order"]["_meta"]["securitySchemes"][0]["type"] == "oauth2"
             response = await client.post(

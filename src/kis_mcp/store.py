@@ -31,6 +31,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, message TEXT NOT NULL,
                     attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
                     sent_at REAL);
+                CREATE TABLE IF NOT EXISTS toss_conditions (id TEXT PRIMARY KEY, doc TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS toss_watches (id TEXT PRIMARY KEY, doc TEXT NOT NULL);
             """)
             initialized = self.db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
             if initialized is None:
@@ -92,6 +94,27 @@ class Store:
         self.db.execute(
             "INSERT INTO orders VALUES (?,?) ON CONFLICT(id) DO UPDATE SET doc=excluded.doc",
             (order["id"], encoded(order)),
+        )
+
+    def documents(self, table):
+        if table not in ("toss_conditions", "toss_watches"):
+            raise ValueError("Invalid document table")
+        return [json.loads(row[0]) for row in self.db.execute(f"SELECT doc FROM {table} ORDER BY rowid DESC")]
+
+    def document(self, table, doc_id):
+        if table not in ("toss_conditions", "toss_watches"):
+            raise ValueError("Invalid document table")
+        row = self.db.execute(f"SELECT doc FROM {table} WHERE id=?", (doc_id,)).fetchone()
+        if row is None:
+            raise TradingError("Unknown Toss condition or watch ID")
+        return json.loads(row[0])
+
+    def put_document(self, table, doc):
+        if table not in ("toss_conditions", "toss_watches"):
+            raise ValueError("Invalid document table")
+        self.db.execute(
+            f"INSERT INTO {table} VALUES (?,?) ON CONFLICT(id) DO UPDATE SET doc=excluded.doc",
+            (doc["id"], encoded(doc)),
         )
 
     def request(self, request_id, kind, payload):

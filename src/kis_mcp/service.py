@@ -36,6 +36,7 @@ PUBLIC_ORDER_FIELDS = (
     "resolution",
     "resolved_at",
     "error",
+    "entry_cost_check",
 )
 
 

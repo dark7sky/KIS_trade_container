@@ -2,8 +2,9 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 import uvicorn
@@ -24,14 +25,20 @@ from .models import (
     OrderInput,
     OrderType,
     Side,
+    TossOCOInput,
     TossOrderInput,
+    TossReplayInput,
+    TossWatchInput,
     TradingError,
 )
 from .service import TradingService
 from .store import Store
 from .telegram import Notifications
 from .toss import Toss
+from .toss_conditions import TossConditions
+from .toss_fastpath import TossMarketStream
 from .toss_service import TossTradingService
+from .toss_watches import TossWatches
 
 Symbol = Annotated[str, Field(pattern=r"^(?:\d{6}|Q\d{6})$")]
 USSymbol = Annotated[str, Field(min_length=1, max_length=20, pattern=r"^[A-Z][A-Z0-9.\-]*$")]
@@ -91,21 +98,37 @@ def create_app(settings=None, *, broker=None, toss_broker=None, verifier=None, n
     verifier = verifier or KeycloakVerifier(settings)
     service = None
     toss_service = None
+    toss_conditions = None
+    toss_watches = None
+    toss_stream = None
 
     @asynccontextmanager
     async def lifespan(app):
-        nonlocal service, toss_service
+        nonlocal service, toss_service, toss_conditions, toss_watches, toss_stream
         store = Store(settings.data_dir)
         notifications = notifier or Notifications(settings, store)
         service = TradingService(settings, store, broker)
         toss_service = TossTradingService(settings, store, toss_broker, lock=service.lock)
+        toss_conditions = TossConditions(toss_service)
+        toss_watches = TossWatches(toss_service)
+        if isinstance(toss_broker, Toss):
+            toss_stream = TossMarketStream(toss_service, toss_watches, toss_conditions)
+            toss_watches.stream_enabled = True
+            toss_service.market_stream = toss_stream
         app.state.service = service
         app.state.toss_service = toss_service
+        app.state.toss_conditions = toss_conditions
+        app.state.toss_watches = toss_watches
+        app.state.toss_stream = toss_stream
         tasks = [
             asyncio.create_task(service.supervise()),
             asyncio.create_task(notifications.run()),
+            asyncio.create_task(toss_conditions.supervise()),
+            asyncio.create_task(toss_watches.supervise()),
             asyncio.create_task(toss_service.supervise()),
         ]
+        if toss_stream is not None:
+            tasks.append(asyncio.create_task(toss_stream.run()))
         app.state.worker_tasks = tasks
         try:
             # FastMCP's low-level lifespan is per request in stateless mode.
@@ -306,6 +329,37 @@ def create_app(settings=None, *, broker=None, toss_broker=None, verifier=None, n
         return await safe(toss_service.place(request))
 
     @mcp.tool(annotations=read, meta=oauth_meta)
+    async def toss_estimate_entry_cost(
+        symbol: USSymbol,
+        expected_move_bps: Annotated[Decimal, Field(ge=0, le=10000, allow_inf_nan=False)],
+        quantity: Annotated[int, Field(strict=True, gt=0)] = 1,
+        slippage_bps: Annotated[Decimal, Field(ge=0, le=10000, allow_inf_nan=False)] = Decimal("10"),
+        max_spread_bps: Annotated[Decimal, Field(gt=0, le=10000, allow_inf_nan=False)] = Decimal("25"),
+    ) -> dict:
+        """실시간 호가·현재 토스 수수료·사용자 슬리피지 여유로 왕복 비용을 추정. 예상 변동폭은 AI 가정이며 수익 보장 아님. 호가가 10초 넘게 묵으면 평가 거부."""
+        return await safe(toss_service.entry_cost(symbol, expected_move_bps, slippage_bps, max_spread_bps, quantity))
+
+    @mcp.tool(annotations=write, meta=oauth_meta)
+    async def toss_place_guarded_order(
+        client_request_id: str,
+        symbol: USSymbol,
+        quantity: Annotated[int, Field(strict=True, gt=0)],
+        expected_move_bps: Annotated[Decimal, Field(ge=0, le=10000, allow_inf_nan=False)],
+        price: Annotated[Decimal, Field(gt=0, le=1000000000, allow_inf_nan=False)],
+        slippage_bps: Annotated[Decimal, Field(ge=0, le=10000, allow_inf_nan=False)] = Decimal("10"),
+        max_spread_bps: Annotated[Decimal, Field(gt=0, le=10000, allow_inf_nan=False)] = Decimal("25"),
+    ) -> dict:
+        """토스 미국주식 실전 지정가 매수. 신선한 호가와 실제 수수료로 예상 이동폭 > 왕복 비용이며 스프레드 제한 이내일 때만 전송. 예상 이동폭은 AI 입력값이며 보장 아님. 동일 client_request_id만 재조회."""
+        request = TossOrderInput(client_request_id=client_request_id, symbol=symbol, side="buy", quantity=quantity, order_type="limit", price=price)
+        guard = {"expected_move_bps": expected_move_bps, "slippage_bps": slippage_bps, "max_spread_bps": max_spread_bps}
+        return await safe(toss_service.place(request, guard=guard))
+
+    @mcp.tool(annotations=read, meta=oauth_meta)
+    async def toss_get_stream_status() -> dict:
+        """토스 실시간 체결·호가·주문 구독 상태와 유실 가능성. 시세에는 순번이 없어 중간 프레임 유실은 확정 탐지 불가."""
+        return toss_stream.status() if toss_stream else {"healthy": False, "error": "Toss stream unavailable"}
+
+    @mcp.tool(annotations=read, meta=oauth_meta)
     async def toss_list_orders(start_date: str, end_date: str) -> dict:
         """토스 미국주식 주문과 MCP 저장 스냅샷. YYYY-MM-DD, 최근 90일, 주문 생성일의 한국시간 기준."""
         return await safe(toss_service.list_orders(start_date, end_date))
@@ -329,6 +383,121 @@ def create_app(settings=None, *, broker=None, toss_broker=None, verifier=None, n
     async def toss_resolve_order_not_submitted(order_id: str) -> dict:
         """사용자가 토스 내역·고객지원에서 미접수를 확인한 unknown 주문만 종결. 후보 없음을 재검사하며 새 거래 전송 없음."""
         return await safe(toss_service.resolve_order_not_submitted(order_id))
+
+    @mcp.tool(annotations=write, meta=oauth_meta)
+    async def toss_create_oco(
+        client_request_id: str,
+        symbol: USSymbol,
+        quantity: Annotated[int, Field(strict=True, gt=0)],
+        take_profit_trigger: Decimal,
+        take_profit_limit: Decimal,
+        stop_loss_trigger: Decimal,
+        stop_loss_limit: Decimal,
+        expire_date: str,
+    ) -> dict:
+        """실전 보유주식에 토스 OCO 익절·손절 지정가 조건주문 등록. 한쪽 조건 발동 시 반대쪽 조건은 취소되며 실제 체결은 보장되지 않음. 응답 유실 시 새 ID로 재등록 금지."""
+        request = TossOCOInput(
+            client_request_id=client_request_id,
+            symbol=symbol,
+            quantity=quantity,
+            take_profit_trigger=take_profit_trigger,
+            take_profit_limit=take_profit_limit,
+            stop_loss_trigger=stop_loss_trigger,
+            stop_loss_limit=stop_loss_limit,
+            expire_date=expire_date,
+        )
+        return await safe(toss_conditions.create_oco(request))
+
+    @mcp.tool(annotations=read, meta=oauth_meta)
+    async def toss_list_conditions() -> dict:
+        """이 MCP에서 생성한 토스 보호 조건 목록. 상태는 마지막 관측값이며 발생 주문의 체결과 다름."""
+        return {"conditions": toss_conditions.list(), "last_poll": toss_conditions.last_poll, "poll_error": toss_conditions.poll_error}
+
+    @mcp.tool(annotations=read, meta=oauth_meta)
+    async def toss_get_condition(condition_id: str) -> dict:
+        """토스 보호 조건 최신 상태·발생 주문 ID 조회. 조건 발동은 체결 완료를 뜻하지 않음."""
+        return await safe(toss_conditions.refresh(condition_id))
+
+    @mcp.tool(annotations=write, meta=oauth_meta)
+    async def toss_cancel_condition(client_request_id: str, condition_id: str) -> dict:
+        """토스 보호 조건 취소. 이미 발동된 주문은 별도 상태 확인 및 취소가 필요하며 응답 유실 시 재요청 금지."""
+        return await safe(toss_conditions.cancel(client_request_id, condition_id))
+
+    @mcp.tool(annotations=write, meta=oauth_meta)
+    async def toss_resolve_condition(condition_id: str, broker_id: str) -> dict:
+        """응답 유실 OCO만 사용. 토스 앱에서 직접 확인한 조건주문 ID와 모든 조건·수량을 대조하여 연결. 새 주문 없음."""
+        return await safe(toss_conditions.resolve(condition_id, broker_id))
+
+    @mcp.tool(annotations=write, meta=oauth_meta)
+    async def toss_resolve_condition_not_submitted(condition_id: str, confirmed_in_toss_app: bool) -> dict:
+        """응답 유실 OCO가 토스 앱에 없음을 직접 확인한 후에만 사용. 브로커 목록을 다시 조회하고 유사 후보가 있으면 거부. 새 주문 없음."""
+        return await safe(toss_conditions.resolve_not_submitted(condition_id, confirmed_in_toss_app))
+
+    @mcp.tool(annotations=write, meta=oauth_meta)
+    async def toss_resolve_condition_cancel(condition_id: str, confirmed_cancelled_in_toss_app: bool) -> dict:
+        """취소 응답 유실 조건을 토스 앱과 대조하여 수동 복구. true=앱에서 취소 확인, false=앱에서 여전히 감시 중 확인. 새 거래 없음."""
+        return await safe(toss_conditions.resolve_cancel(condition_id, confirmed_cancelled_in_toss_app))
+
+    @mcp.tool(annotations=write, meta=oauth_meta)
+    async def toss_create_watch(
+        client_request_id: str,
+        symbol: USSymbol,
+        kind: Literal["price_at_or_above", "price_at_or_below", "volume_breakout_1m"],
+        expires_at: datetime,
+        threshold: Decimal | None = None,
+        volume_multiplier: Decimal = Decimal("2"),
+    ) -> dict:
+        """토스 시세 감시 1건 생성. 가격 이상/이하 또는 완성된 1분봉의 거래량 증가+직전 5봉 고점 돌파를 한 번 알림. 최대 24시간, 자동 주문 없음."""
+        request = TossWatchInput(
+            client_request_id=client_request_id,
+            symbol=symbol,
+            kind=kind,
+            expires_at=expires_at,
+            threshold=threshold,
+            volume_multiplier=volume_multiplier,
+        )
+        return await safe(toss_watches.create(request))
+
+    @mcp.tool(annotations=read, meta=oauth_meta)
+    async def toss_list_watches() -> dict:
+        """가격·분봉 알림의 현재 상태와 마지막 신호 근거 조회."""
+        return {"watches": toss_watches.list(), "last_poll": toss_watches.last_poll, "poll_error": toss_watches.poll_error}
+
+    @mcp.tool(annotations=write, meta=oauth_meta)
+    async def toss_stop_watch(watch_id: str) -> dict:
+        """감시를 중지. 브로커 주문·조건주문을 취소하지 않음."""
+        return await safe(toss_watches.stop(watch_id))
+
+    @mcp.tool(annotations=read, meta=oauth_meta)
+    async def toss_replay_watch(rule: dict, observations: list[dict]) -> dict:
+        """규칙 {kind,created_at,threshold?,volume_multiplier?}과 관측 [{as_of,quote?{price,broker_timestamp},candles?[]}]을 최대 200개 재생. 계좌·브로커 접근과 저장 없음."""
+        try:
+            request = TossReplayInput.model_validate(rule)
+            if len(observations) > 200:
+                raise TradingError("Replay supports at most 200 observations")
+            return TossWatches.replay(request, observations)
+        except TradingError as exc:
+            return public_error(exc)
+        except (KeyError, TypeError, ValueError):
+            return public_error(TradingError("Invalid replay observations"))
+
+    @mcp.tool(annotations=read, meta=oauth_meta)
+    async def toss_get_situation(symbol: USSymbol) -> dict:
+        """토스 미국주식 현재가·보유·미완료 보호 조건·활성 감시·조회 시각을 한 번에 요약. 각 데이터의 관측시각은 다를 수 있음."""
+        async def result():
+            account = await toss_service.account()
+            quote = await toss_service.quote(symbol)
+            return {
+                "symbol": symbol,
+                "quote": quote,
+                "holding": next((h for h in account["holdings"] if h["symbol"] == symbol), None),
+                "cash_buy_amount": account["cash_buy_amount"],
+                "conditions": [d for d in toss_conditions.list() if d["symbol"] == symbol and d["status"] not in ("COMPLETED", "EXPIRED", "rejected", "cancelled")],
+                "watches": [d for d in toss_watches.list() if d["symbol"] == symbol and d["status"] == "watching"],
+                "observed_at": account["price_observed_at"],
+            }
+
+        return await safe(result())
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def health(request):

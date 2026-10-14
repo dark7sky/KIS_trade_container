@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import httpx
 from test_integrations import rsa_keys as rsa_keys
@@ -51,6 +52,13 @@ async def test_toss_authenticated_mcp_lifecycle(settings, broker, rsa_keys):
             assert tools["toss_place_order"]["annotations"]["destructiveHint"]
             assert tools["toss_place_order"]["_meta"]["securitySchemes"][0]["type"] == "oauth2"
             assert "quantity" not in tools["toss_cancel_order"]["inputSchema"]["properties"]
+            assert {
+                "toss_create_oco", "toss_get_condition", "toss_resolve_condition",
+                "toss_resolve_condition_not_submitted", "toss_create_watch",
+                "toss_stop_watch", "toss_replay_watch", "toss_get_situation",
+            } <= tools.keys()
+            assert tools["toss_create_oco"]["annotations"]["destructiveHint"]
+            assert tools["toss_replay_watch"]["annotations"]["readOnlyHint"]
 
             async def call(name, arguments):
                 result = (await rpc("tools/call", {"name": name, "arguments": arguments})).json()[
@@ -58,6 +66,13 @@ async def test_toss_authenticated_mcp_lifecycle(settings, broker, rsa_keys):
                 ]
                 assert not result.get("isError"), result
                 return json.loads(result["content"][0]["text"])
+
+            observed = datetime.now(timezone.utc).isoformat()
+            replay = await call("toss_replay_watch", {
+                "rule": {"kind": "price_at_or_above", "threshold": "101", "created_at": observed},
+                "observations": [{"as_of": observed, "quote": {"price": "102", "broker_timestamp": observed}}],
+            })
+            assert replay["triggered"] is True
 
             args = {
                 "client_request_id": "mcp-toss-1",

@@ -1,13 +1,25 @@
 """Fast path regressions: stale feeds, entry cost, and generated-order stalls."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from test_toss_automation import AutomationBroker, oco_request
 
+from kis_mcp.config import TossCredentials
 from kis_mcp.models import TossOrderInput, TradingError
+from kis_mcp.toss_conditions import TossConditions
 from kis_mcp.toss_fastpath import TossMarketStream, estimate_entry
+from kis_mcp.toss_service import TossTradingService
+from kis_mcp.toss_watches import TossWatches
 
-from test_toss_automation import oco_request
+
+@pytest.fixture
+def automation(service, settings):
+    settings.toss_credentials = TossCredentials("test-client", "test-secret", "3")
+    broker = AutomationBroker()
+    toss = TossTradingService(settings, service.store, broker, lock=service.lock)
+    return TossConditions(toss), TossWatches(toss), broker
 
 
 def stamp(seconds=0):
@@ -27,6 +39,8 @@ def test_entry_cost_rejects_stale_crossed_and_insufficient_edge():
     assert result["allowed"] is False
     assert result["round_trip_cost_bps"] == "40"
     assert estimate_entry(book(), "0.001", "70", "10")["allowed"] is True
+    with pytest.raises(TradingError, match="liquidity"):
+        estimate_entry(book(), "0.001", "70", "10", quantity=21)
 
 
 async def test_stream_validates_ack_and_does_not_fire_stale_or_replayed_trade(automation):
@@ -52,15 +66,75 @@ async def test_stream_rejected_subscription_fails_closed(automation):
     stream = TossMarketStream(watches.service, watches)
     await stream.handle({"type": "subscriptions", "subscribed": [], "rejected": [{"target": "trade:us:SOXL", "code": "stock-not-found", "message": "bad"}]})
     assert stream.status()["healthy"] is False
+    assert "trade:us:SOXL" not in stream.wanted()
+    assert "trade:us:SOXL" in stream.status()["rejected"]
     await stream.handle({"type": "message", "topic": "orderbook:us:SOXL", "data": book()})
-    with pytest.raises(TradingError, match="fresh"):
+    with pytest.raises(TradingError, match="Fresh"):
         stream.orderbook("SOXL")
+
+
+async def test_stream_declares_one_full_replacement_and_redacts_account(automation):
+    _, watches, _ = automation
+    stream = TossMarketStream(watches.service, watches)
+    declaration = stream.declaration(stream.wanted())
+    assert declaration == [
+        {"type": "trade:us", "codes": ["SOXL", "SOXS"]},
+        {"type": "orderbook:us", "codes": ["SOXL", "SOXS"]},
+        {"type": "personal:order", "codes": ["3"]},
+    ]
+    await stream.handle({"type": "subscriptions", "subscribed": ["personal:order:3"], "rejected": []})
+    assert stream.status()["subscribed"] == ["personal:order"]
+
+
+async def test_stream_worker_subscribes_without_live_network(automation, monkeypatch):
+    import json
+
+    import websockets.asyncio.client
+
+    _, watches, broker = automation
+    stream = TossMarketStream(watches.service, watches)
+    sent = []
+    sent_event = asyncio.Event()
+
+    async def token():
+        return "fake-token"
+
+    class FakeSocket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def send(self, message):
+            sent.append(message)
+            sent_event.set()
+
+        async def recv(self):
+            await asyncio.Event().wait()
+
+    def fake_connect(url, **kwargs):
+        assert url.endswith("/ws/v1")
+        assert kwargs["additional_headers"] == {"Authorization": "Bearer fake-token"}
+        return FakeSocket()
+
+    broker.token = token
+    monkeypatch.setattr(websockets.asyncio.client, "connect", fake_connect)
+    task = asyncio.create_task(stream.run())
+    try:
+        await asyncio.wait_for(sent_event.wait(), timeout=2)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert json.loads(sent[0]) == stream.declaration(stream.wanted())
+    assert stream.status()["healthy"] is False
 
 
 async def test_guarded_order_blocks_before_submission_when_cost_exceeds_edge(automation):
     conditions, watches, broker = automation
     stream = TossMarketStream(watches.service, watches)
     stream.accept_book("SOXL", book())
+    await stream.handle({"type": "subscriptions", "subscribed": ["orderbook:us:SOXL"], "rejected": []})
     service = conditions.service
     service.market_stream = stream
     async def commissions():
@@ -70,6 +144,88 @@ async def test_guarded_order_blocks_before_submission_when_cost_exceeds_edge(aut
     with pytest.raises(TradingError, match="cost"):
         await service.place(request, guard={"expected_move_bps": "15", "slippage_bps": "10"})
     assert service.orders() == []
+
+
+async def test_guarded_order_sends_once_with_fresh_book_and_reuses_request_id(automation):
+    conditions, watches, broker = automation
+    stream = TossMarketStream(watches.service, watches)
+    stream.accept_book("SOXL", book())
+    await stream.handle({"type": "subscriptions", "subscribed": ["orderbook:us:SOXL"], "rejected": []})
+    service = conditions.service
+    service.market_stream = stream
+    calls = []
+
+    async def commissions():
+        return "0.001"
+
+    async def orders(*args, **kwargs):
+        return []
+
+    async def place(order):
+        calls.append(order["id"])
+        return {"broker_id": "broker-order-1"}
+
+    broker.commission_rate = commissions
+    broker.orders = orders
+    broker.place = place
+    request = TossOrderInput(client_request_id="fast-guard-2", symbol="SOXL", side="buy", quantity=1, price="100.05")
+    guard = {"expected_move_bps": "70", "slippage_bps": "10"}
+    first = await service.place(request, guard=guard)
+    stream.disconnect()
+    second = await service.place(request, guard=guard)
+    assert first["status"] == second["status"] == "accepted"
+    assert first["entry_cost_check"]["round_trip_cost_bps"] == "40"
+    assert calls == [first["id"]]
+
+
+async def test_guarded_order_rejects_limit_above_slippage_budget(automation):
+    conditions, watches, broker = automation
+    stream = TossMarketStream(watches.service, watches)
+    stream.accept_book("SOXL", book())
+    await stream.handle({"type": "subscriptions", "subscribed": ["orderbook:us:SOXL"], "rejected": []})
+    conditions.service.market_stream = stream
+
+    async def commissions():
+        return "0.001"
+
+    broker.commission_rate = commissions
+    request = TossOrderInput(client_request_id="fast-guard-3", symbol="SOXL", side="buy", quantity=1, price="101")
+    with pytest.raises(TradingError, match="slippage"):
+        await conditions.service.place(request, guard={"expected_move_bps": "100", "slippage_bps": "10"})
+    assert conditions.service.orders() == []
+
+
+async def test_guarded_order_rechecks_feed_after_capacity_queries(automation):
+    conditions, watches, broker = automation
+    stream = TossMarketStream(watches.service, watches)
+    stream.accept_book("SOXL", book())
+    await stream.handle({"type": "subscriptions", "subscribed": ["orderbook:us:SOXL"], "rejected": []})
+    conditions.service.market_stream = stream
+
+    async def commissions():
+        return "0.001"
+
+    async def orders(*args, **kwargs):
+        stream.disconnect()
+        return []
+
+    broker.commission_rate = commissions
+    broker.orders = orders
+    request = TossOrderInput(client_request_id="fast-guard-4", symbol="SOXL", side="buy", quantity=1, price="100.05")
+    with pytest.raises(TradingError, match="Fresh"):
+        await conditions.service.place(request, guard={"expected_move_bps": "70", "slippage_bps": "10"})
+    assert conditions.service.orders() == []
+
+
+async def test_stream_disconnect_invalidates_orderbook(automation):
+    _, watches, _ = automation
+    stream = TossMarketStream(watches.service, watches)
+    stream.accept_book("SOXL", book())
+    await stream.handle({"type": "subscriptions", "subscribed": ["orderbook:us:SOXL"], "rejected": []})
+    assert stream.orderbook("SOXL")["currency"] == "USD"
+    stream.disconnect()
+    with pytest.raises(TradingError, match="Fresh"):
+        stream.orderbook("SOXL")
 
 
 async def test_generated_order_stall_alert_survives_restart_and_partial_fill_resets_clock(automation):

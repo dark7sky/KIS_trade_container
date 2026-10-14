@@ -1,4 +1,6 @@
+import asyncio
 import json
+from datetime import date, timedelta
 
 import httpx
 import pytest
@@ -31,6 +33,48 @@ def order():
         "order_type": "limit",
         "price": "185.5",
     }
+
+
+async def test_current_us_commission_requires_one_active_rate():
+    rows = [
+        {"marketCountry": "US", "commissionRate": "0.001", "startDate": None, "endDate": None},
+        {"marketCountry": "KR", "commissionRate": "0.00015", "startDate": None, "endDate": None},
+    ]
+
+    def handler(req):
+        if req.url.path == "/oauth2/token":
+            return token_response()
+        assert req.url.path == "/api/v1/commissions"
+        assert req.headers["X-Tossinvest-Account"] == "3"
+        return httpx.Response(200, json={"result": rows})
+
+    api = client(handler)
+    try:
+        assert await api.commission_rate() == "0.001"
+        rows.append({"marketCountry": "US", "commissionRate": "0.002", "startDate": None, "endDate": None})
+        with pytest.raises(TradingError, match="ambiguous"):
+            await api.commission_rate()
+        rows.pop()
+        rows[0]["endDate"] = (date.today() - timedelta(days=2)).isoformat()
+        with pytest.raises(TradingError, match="unavailable"):
+            await api.commission_rate()
+    finally:
+        await api.close()
+
+
+async def test_concurrent_rest_and_stream_token_request_issues_one_token():
+    requested = []
+
+    def handler(req):
+        requested.append(req.url.path)
+        return token_response()
+
+    api = client(handler)
+    try:
+        assert await asyncio.gather(api.token(), api.token()) == ["test-token", "test-token"]
+        assert requested == ["/oauth2/token"]
+    finally:
+        await api.close()
 
 
 async def test_auth_and_order_contract():
@@ -268,6 +312,47 @@ async def test_complete_pagination_and_opaque_detail_id():
         assert (await api.detail("opaque-ID"))["orderId"] == "opaque-ID"
         with pytest.raises(TradingError):
             await api.detail("../wrong-path")
+    finally:
+        await api.close()
+
+
+async def test_oco_rest_contract_delete_204_and_minute_candles():
+    seen = []
+
+    def handler(req):
+        if req.url.path == "/oauth2/token":
+            return token_response()
+        seen.append(req)
+        if req.url.path == "/api/v1/candles":
+            assert req.url.params["interval"] == "1m"
+            return httpx.Response(200, json={"result": {"candles": [{
+                "timestamp": "2026-10-14T22:31:00+09:00",
+                "openPrice": "100", "highPrice": "102", "lowPrice": "99",
+                "closePrice": "101", "volume": "300", "currency": "USD",
+            }]}})
+        assert req.headers["X-Tossinvest-Account"] == "3"
+        if req.method == "POST":
+            body = json.loads(req.content)
+            assert body["type"] == "OCO" and body["orderType"] == "LIMIT"
+            assert body["first"]["triggerPrice"] == "110"
+            return httpx.Response(200, json={"result": {"conditionalOrderId": "condition-1"}})
+        if req.method == "GET":
+            return httpx.Response(200, json={"result": {"conditionalOrderId": "condition-1"}})
+        return httpx.Response(204)
+
+    api = client(handler)
+    try:
+        payload = {
+            "symbol": "SOXL", "type": "OCO", "quantity": "2", "orderType": "LIMIT",
+            "expireDate": "2026-10-15",
+            "first": {"orderSide": "SELL", "triggerPrice": "110", "orderPrice": "109"},
+            "second": {"orderSide": "SELL", "triggerPrice": "90", "orderPrice": "89"},
+        }
+        assert await api.create_oco(payload) == "condition-1"
+        assert (await api.conditional_detail("condition-1"))["conditionalOrderId"] == "condition-1"
+        assert await api.cancel_conditional("condition-1") == {}
+        assert (await api.candles("SOXL", 6))[0]["volume"] == "300"
+        assert [r.method for r in seen] == ["POST", "GET", "DELETE", "GET"]
     finally:
         await api.close()
 

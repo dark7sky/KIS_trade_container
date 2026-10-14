@@ -8,6 +8,7 @@ from .kis import KST
 from .models import BrokerRejected, CancelInput, SubmissionNotSent, TradingError
 from .service import TradingService, public_order
 from .toss import decimal, identity, money
+from .toss_fastpath import estimate_entry
 
 TERMINAL = ("filled", "cancelled", "rejected", "not_submitted")
 
@@ -31,6 +32,7 @@ class TossTradingService(TradingService):
     def __init__(self, settings, store, broker, *, lock=None):
         super().__init__(settings, store, broker)
         self.lock = lock or asyncio.Lock()
+        self.market_stream = None
 
     def orders(self):
         return [o for o in self.store.orders() if o.get("broker") == "toss"]
@@ -107,9 +109,28 @@ class TossTradingService(TradingService):
             "sessions": await self.broker.calendar(),
         }
 
-    async def place(self, request):
+    async def entry_cost(self, symbol, expected_move_bps, slippage_bps, max_spread_bps="25", quantity=1):
+        self.active()
+        if self.market_stream is None:
+            raise TradingError("Fresh Toss orderbook unavailable")
+        book = self.market_stream.orderbook(symbol)
+        rate = await self.broker.commission_rate()
+        return {"symbol": symbol, **estimate_entry(book, rate, expected_move_bps, slippage_bps, max_spread_bps=max_spread_bps, quantity=quantity)}
+
+    @staticmethod
+    def validate_guarded_quote(request, guard, check):
+        if not check["allowed"]:
+            raise TradingError("Expected move does not exceed Toss entry cost or spread limit")
+        if request.price < decimal(check["ask"]):
+            raise TradingError("Guarded buy limit is below the observed ask; immediate execution unlikely")
+        if request.price > decimal(check["ask"]) * (1 + decimal(guard["slippage_bps"]) / 10000):
+            raise TradingError("Guarded buy limit exceeds the slippage allowance")
+
+    async def place(self, request, *, guard=None):
         payload = request.model_dump(mode="json")
         payload["price"] = money(request.price)
+        if guard is not None:
+            payload["entry_guard"] = {key: money(guard[key]) for key in ("expected_move_bps", "slippage_bps", "max_spread_bps") if key in guard}
         async with self.lock:
             previous = self.store.request(request.client_request_id, "toss_place", payload)
             if previous is not None:
@@ -117,10 +138,20 @@ class TossTradingService(TradingService):
                 self.check_account(saved)
                 return public_order(saved)
             self.active()
+            if guard is not None:
+                if request.side != "buy" or request.order_type != "limit":
+                    raise TradingError("Guarded Toss entry supports limit buy orders only")
+                check = await self.entry_cost(request.symbol, guard["expected_move_bps"], guard["slippage_bps"], guard.get("max_spread_bps", "25"), request.quantity)
+                self.validate_guarded_quote(request, guard, check)
             if any(o["status"] in ("unknown", "submitting", "needs_review") for o in self.orders()):
                 raise TradingError(
                     "Resolve Toss uncertain or needs_review orders before another order"
                 )
+            if any(
+                d["status"] in ("unknown", "submitting", "cancel_unknown", "cancel_submitting")
+                for d in self.store.documents("toss_conditions")
+            ):
+                raise TradingError("Resolve uncertain Toss conditional order before another order")
             capacity = await self.broker.capacity(request.symbol, request.price)
             if request.side == "buy":
                 # MARKET has no guaranteed cash quantity in the API. Broker performs final check.
@@ -153,6 +184,14 @@ class TossTradingService(TradingService):
             }
             baseline = await self.broker.orders(*history_range(order), symbol=request.symbol)
             order["baseline_ids"] = [identity(r.get("orderId")) for r in baseline]
+            if guard is not None:
+                check = {"symbol": request.symbol, **estimate_entry(
+                    self.market_stream.orderbook(request.symbol), check["commission_rate"],
+                    guard["expected_move_bps"], guard["slippage_bps"],
+                    max_spread_bps=guard.get("max_spread_bps", "25"), quantity=request.quantity,
+                )}
+                self.validate_guarded_quote(request, guard, check)
+                order["entry_cost_check"] = check
             with self.store.transaction():
                 self.store.put(order)
                 self.store.save_request(

@@ -411,6 +411,7 @@ async def test_telegram_discards_legacy_watch_signal_but_sends_fill(settings):
     try:
         store.event("toss-watch:old", {"watch_id": "old"}, "old watch signal")
         store.event("fill:new", {"type": "fill"}, "new fill")
+        store.db.execute("UPDATE outbox SET next_attempt=? WHERE id='toss-watch:old'", (time.time() + 3600,))
         assert store.pending_count() == 2
         await notifier.flush()
         assert seen == ["new fill"]

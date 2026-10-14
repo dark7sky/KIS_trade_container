@@ -455,7 +455,7 @@ def create_app(settings=None, *, broker=None, toss_broker=None, verifier=None, n
         threshold: Decimal | None = None,
         volume_multiplier: Decimal = Decimal("2"),
     ) -> dict:
-        """토스 시세 감시 1건 생성. 가격 이상/이하 또는 완성된 1분봉의 거래량 증가+직전 5봉 고점 돌파를 한 번 알림. 최대 24시간, 자동 주문 없음."""
+        """토스 시세 감시 1건 생성. 가격 이상/이하 또는 완성된 1분봉의 거래량 증가+직전 5봉 고점 돌파 신호를 기록. 텔레그램 발송·자동 주문 없음. 최대 24시간."""
         request = TossWatchInput(
             client_request_id=client_request_id,
             symbol=symbol,
@@ -468,7 +468,7 @@ def create_app(settings=None, *, broker=None, toss_broker=None, verifier=None, n
 
     @mcp.tool(annotations=read, meta=oauth_meta)
     async def toss_list_watches() -> dict:
-        """가격·분봉 알림의 현재 상태와 마지막 신호 근거 조회."""
+        """가격·분봉 감시 상태와 마지막 신호 근거 조회. 신호는 텔레그램으로 보내지 않음."""
         return {"watches": toss_watches.list(), "last_poll": toss_watches.last_poll, "poll_error": toss_watches.poll_error}
 
     @mcp.tool(annotations=write, meta=oauth_meta)

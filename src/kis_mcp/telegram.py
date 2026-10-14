@@ -7,8 +7,12 @@ class Notifications:
     def __init__(self, settings, store, client=None):
         self.settings, self.store = settings, store
         self.client = client or httpx.AsyncClient(timeout=15, follow_redirects=False)
+        self.legacy_watch_alerts_discarded = False
 
     async def flush(self):
+        if not self.legacy_watch_alerts_discarded:
+            self.store.discard_pending_watch_alerts()
+            self.legacy_watch_alerts_discarded = True
         for row in self.store.pending_messages():
             retry_after = 0
             try:

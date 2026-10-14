@@ -145,10 +145,18 @@ class Store:
                 ids.append(str(broker_id))
         return ids
 
-    def event(self, event_id, event, message):
+    def event(self, event_id, event, message=None):
         self.db.execute("INSERT OR IGNORE INTO events VALUES (?,?)", (event_id, encoded(event)))
+        if message is not None:
+            self.db.execute(
+                "INSERT OR IGNORE INTO outbox(id,message) VALUES (?,?)", (event_id, message)
+            )
+
+    def discard_pending_watch_alerts(self):
+        # Watch evidence remains in events and toss_watches; only the old
+        # Telegram delivery queue entries are removed.
         self.db.execute(
-            "INSERT OR IGNORE INTO outbox(id,message) VALUES (?,?)", (event_id, message)
+            "DELETE FROM outbox WHERE id LIKE 'toss-watch:%' AND sent_at IS NULL"
         )
 
     def pending_messages(self):

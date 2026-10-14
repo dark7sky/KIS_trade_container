@@ -1,4 +1,4 @@
-"""One-shot, persisted Toss market alerts. This module never submits orders."""
+"""One-shot, persisted Toss market signals. This module never submits orders."""
 
 import asyncio
 import uuid
@@ -161,7 +161,6 @@ class TossWatches:
             self.store.event(
                 "toss-watch:" + doc["id"],
                 {"broker": "toss", "watch_id": doc["id"], "evidence": hit},
-                f"[실전 TOSS US] {doc['symbol']} {doc['kind']} 신호 발생. 관측 {hit}. 자동 주문 없음.",
             )
 
     async def tick(self, *, now=None):
@@ -211,7 +210,7 @@ class TossWatches:
                     continue
                 self._trigger(doc, hit, evaluated_at)
             self.last_poll = evaluated_at.isoformat()
-            self.poll_error = "Some Toss market observations failed; alerts may be delayed" if failures else None
+            self.poll_error = "Some Toss market observations failed; signals may be delayed" if failures else None
 
     async def supervise(self):
         while True:

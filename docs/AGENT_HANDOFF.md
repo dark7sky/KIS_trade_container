@@ -6,11 +6,13 @@
 
 ## 1. 현재 상태와 다음 작업
 
-### 2026-10-14 토스 분봉·실시간 감시 업데이트 배포 (진행 중)
+### 2026-10-14 토스 분봉·실시간 감시 업데이트 배포 완료
 
-- 사용자 배포 승인. 로컬 코드 HEAD `3221a19`까지의 변경을 대상으로 한다. 최신 1분 OHLCV 읽기 도구, 웹소켓 재연결·PING 검증, 감시 상태 경합 수정을 포함한다. 실거래 주문·취소·모드 변경은 배포 검증 범위가 아니다.
+- 사용자 배포 승인. 코드·인계 기록 HEAD `774ea11`을 `origin/main`에 푸시하고 Docker VM `root@192.168.45.222:/srv/kis-trade`에 추적 파일만 동기화했다. 최신 1분 OHLCV 읽기 도구, 웹소켓 재연결·PING 검증, 감시 상태 경합 수정을 포함한다.
 - 배포 전 재검증: 전체 pytest 192 passed, 전체 분기 커버리지 81%, 수정 Python ruff 통과, `pip_audit -r requirements.lock` 알려진 취약점 없음, `git diff --check origin/main..HEAD` 통과. 운영 `/srv/kis-trade`는 Git 저장소가 아닌 추적 파일 배포본이며 현재 `app.py`·`toss.py` 해시가 배포 전 `origin/main`과 일치한다. Compose `config --quiet`와 기존 MCP healthy 확인.
-- 이 기록 시점에는 이번 코드의 origin/main 푸시·MCP 이미지 재빌드·재기동·배포 후 검증이 **미실행**이다. 운영 `.env`와 영속 DB, Keycloak/PostgreSQL은 보존한다. 기존 사용자 원격 제어 문서의 별도 미커밋 수정은 커밋에 포함하지 않는다.
+- 이전 MCP 이미지 `sha256:3262aa2cf919347e2d73b2494da04c323e58208b895bb75374d79ad710578aad`를 `kis-trade-mcp:before-fastpath-20261014`로 보존했다. MCP만 재빌드·재기동했고 새 이미지 ID는 `sha256:26899c290105a4669d921d9139edb56bd2fbc1492fb0c10f659a6c8a3206a8c1`이다. 운영 `.env` 권한 600, 영속 DB, Keycloak/PostgreSQL은 보존했다.
+- 배포 후 `kis-trade-mcp-1` healthy/RestartCount=0, 설치 Python 소스 14개 SHA-256이 로컬 배포 HEAD와 일치, 공개 `/healthz` HTTP 200(`status/store/workers=ok`), 미인증 `/mcp` 초기화 HTTP 401 확인. 새 어댑터가 실제 SOXL·SOXS 분봉을 파싱했고, 새 품질 판정은 각 종목의 진행 중 봉 1개를 제외하고 2026-10-14 22:00 KST 종료의 연속된 완성 봉 6개를 반환했다(관측 당시 54~55초 경과, `fresh=true`).
+- 인증된 외부 MCP 클라이언트에서 새 도구를 직접 호출하는 경로와 운영 웹소켓 실구독의 장시간 안정성은 미검증이다. 실제 주문·취소·모드 변경은 실행하지 않았다. 이 완료 기록은 문서만 후속 커밋·푸시하므로 이미지 재빌드는 하지 않는다. 기존 사용자 원격 제어 문서의 별도 미커밋 수정은 보존한다.
 
 ### 2026-10-14 실계좌 준비·최신 분봉 품질 검증 (로컬, 미배포)
 

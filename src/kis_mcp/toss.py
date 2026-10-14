@@ -347,7 +347,11 @@ class Toss:
                     "close": money(candle["closePrice"]),
                     "volume": money(candle["volume"]),
                 }
-                if decimal(item["high"]) < decimal(item["low"]):
+                values = [decimal(item[key]) for key in ("open", "high", "low", "close")]
+                volume = decimal(item["volume"])
+                if min(values) <= 0 or volume != volume.to_integral_value():
+                    raise ValueError
+                if values[1] < max(values[0], values[2], values[3]) or values[2] > min(values[0], values[1], values[3]):
                     raise ValueError
                 result.append(item)
             except (KeyError, TypeError, ValueError, TradingError):

@@ -49,6 +49,7 @@ MCP 표시 이름은 `Personal Trading`입니다. 기존 설치와 OAuth 연결�
 | --- | --- |
 | `toss_get_account` | 미국주식 보유수량·평균매입가·평가가격과 USD 현금 매수가능액 |
 | `toss_get_quote` | `symbol`: 미국 티커, 현재가 USD와 관측시각 |
+| `toss_get_minute_bars` | `symbol`, `count`(1~199, 기본 20): 최신 완성 1분봉 OHLCV와 지연·누락·연속성 판정 |
 | `toss_get_order_capacity` | `symbol`: USD 현금 매수가능액·매도가능수량 |
 | `toss_get_market_calendar` | 전일·당일·익일 영업일 세션, 휴장·서머타임을 반영한 브로커 시간표 |
 | `toss_place_order` | `client_request_id`, `symbol`, `side`, 정수 `quantity`, `order_type`, USD `price` |
@@ -68,6 +69,8 @@ MCP 표시 이름은 `Personal Trading`입니다. 기존 설치와 OAuth 연결�
 | `toss_get_stream_status` | 실시간 체결·호가·주문 구독, 거부 항목, 지연·연결 상태 확인 |
 | `toss_estimate_entry_cost` | 현재 호가 스프레드·계좌 수수료·입력한 슬리피지 여유를 합쳐 예상 왕복 비용을 평가. 주문 없음 |
 | `toss_place_guarded_order` | 실시간 호가가 10초 이내이고 예상 상승폭이 왕복 비용보다 크며 스프레드 제한 이내일 때만 토스 지정가 매수 전송 |
+
+`toss_get_minute_bars`는 토스 REST 1분봉의 **봉 종료시각**을 그대로 표시합니다. 조회 시점보다 5초 이상 전에 끝난 봉만 반환합니다. 마지막 봉이 70초 이내이고 최근 6개 봉이 1분 간격으로 이어질 때만 `usable_for_entry=true`입니다. 장 마감·휴장·API 지연 또는 연속 봉 부족 시에는 `false`가 됩니다. `gaps`는 반환 봉 사이 누락 구간 수로, 세션 경계에서도 발생할 수 있습니다. 이 값은 데이터 품질 판정이지 방향·수익 예측이 아닙니다. 분봉은 별도 `MARKET_DATA_CHART` 호출 한도를 사용하므로 초단위 반복 조회를 피하세요.
 
 미국 티커는 대문자로 입력합니다(예: `AAPL`, `BRK.B`). 실제 종목 메타데이터에서 미국 시장·USD 여부를 확인하므로 영문 종목코드의 국내주식으로 잘못 주문하지 않습니다. 지정가 가격은 $1 이상 소수 둘째 자리, $1 미만 넷째 자리까지 허용하며 초과 자릿수는 조용히 절삭하지 않고 거부합니다. 시장가는 `price=0`입니다. 정수 수량만 주문하지만 보유·매도가능수량 조회에는 기존 소수점 주식도 표시됩니다.
 

@@ -299,6 +299,14 @@ def create_app(settings=None, *, broker=None, toss_broker=None, verifier=None, n
         return await safe(toss_service.quote(symbol))
 
     @mcp.tool(annotations=read, meta=oauth_meta)
+    async def toss_get_minute_bars(
+        symbol: USSymbol,
+        count: Annotated[int, Field(strict=True, ge=1, le=199)] = 20,
+    ) -> dict:
+        """토스 미국주식 최신 완성 1분 OHLCV. 봉 종료시각, 조회시각, 지연·누락, 최근 연속 봉 수와 진입 데이터 적합성을 반환. 오래된 봉이나 장 마감 후 데이터는 진입에 부적합."""
+        return await safe(toss_service.minute_bars(symbol, count))
+
+    @mcp.tool(annotations=read, meta=oauth_meta)
     async def toss_get_order_capacity(symbol: USSymbol) -> dict:
         """토스 USD 현금 매수가능금액·매도가능수량. 시장가 매수가능수량 보장은 제공하지 않음."""
         return await safe(toss_service.capacity(symbol, Decimal("0")))

@@ -357,6 +357,34 @@ async def test_oco_rest_contract_delete_204_and_minute_candles():
         await api.close()
 
 
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"highPrice": "100"},  # close exceeds high
+        {"lowPrice": "101"},  # open below low
+        {"volume": "1.5"},  # US equity volume is whole shares
+    ],
+)
+async def test_minute_candle_rejects_inconsistent_ohlcv(changed):
+    candle = {
+        "timestamp": "2026-10-14T22:31:00+09:00",
+        "openPrice": "100", "highPrice": "102", "lowPrice": "99",
+        "closePrice": "101", "volume": "300", "currency": "USD",
+    } | changed
+
+    def handler(req):
+        if req.url.path == "/oauth2/token":
+            return token_response()
+        return httpx.Response(200, json={"result": {"candles": [candle]}})
+
+    api = client(handler)
+    try:
+        with pytest.raises(TradingError, match="Invalid Toss candle"):
+            await api.candles("SOXL", 1)
+    finally:
+        await api.close()
+
+
 @pytest.mark.parametrize("status", [400, 401, 403, 422])
 async def test_explicit_rejection_is_sanitized(status):
     def handler(req):

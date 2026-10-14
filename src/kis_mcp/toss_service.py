@@ -2,7 +2,7 @@
 
 import asyncio
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .kis import KST
 from .models import BrokerRejected, CancelInput, SubmissionNotSent, TradingError
@@ -88,6 +88,58 @@ class TossTradingService(TradingService):
     async def quote(self, symbol):
         self.active()
         return {"broker": "toss", "mode": "real", **await self.broker.quote(symbol)}
+
+    async def minute_bars(self, symbol, count=20, *, now=None):
+        """Return broker 1m bars with explicit completeness and freshness evidence."""
+        self.active()
+        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 199:
+            raise TradingError("Toss minute bar count must be 1..199")
+        # Request one extra because the newest broker bar can still be in progress.
+        raw = await self.broker.candles(symbol, count + 1)
+        if not isinstance(raw, list):
+            raise TradingError("Invalid Toss candle response")
+        observed = now or datetime.now(timezone.utc)
+        if observed.tzinfo is None:
+            raise TradingError("Invalid observation time")
+        validated = []
+        for bar in raw:
+            try:
+                end = datetime.fromisoformat(bar["timestamp"])
+                if end.tzinfo is None or end.second or end.microsecond:
+                    raise ValueError
+                prices = [decimal(bar[key]) for key in ("open", "high", "low", "close")]
+                volume = decimal(bar["volume"])
+                if min(prices) <= 0 or volume != volume.to_integral_value():
+                    raise ValueError
+                if prices[1] < max(prices[0], prices[2], prices[3]) or prices[2] > min(prices[0], prices[1], prices[3]):
+                    raise ValueError
+                validated.append((end, bar))
+            except (KeyError, TypeError, ValueError, TradingError):
+                raise TradingError("Invalid Toss candle response") from None
+        if any(validated[i][0] <= validated[i + 1][0] for i in range(len(validated) - 1)):
+            raise TradingError("Invalid Toss candle ordering")
+        # Official 1m timestamp is the end of [timestamp - 1m, timestamp).
+        closed = [(end, bar) for end, bar in validated if end <= observed - timedelta(seconds=5)]
+        selected = closed[:count]
+        gaps = sum(selected[i][0] - selected[i + 1][0] != timedelta(minutes=1) for i in range(len(selected) - 1))
+        contiguous = 0
+        for i, (end, _) in enumerate(selected):
+            if i and selected[i - 1][0] - end != timedelta(minutes=1):
+                break
+            contiguous += 1
+        age = (observed - selected[0][0]).total_seconds() if selected else None
+        fresh = age is not None and 0 <= age <= 70
+        return {
+            "broker": "toss", "mode": "real", "symbol": symbol, "currency": "USD",
+            "source": "toss_rest_1m", "timestamp_basis": "bar_end",
+            "completion_grace_seconds": 5, "freshness_limit_seconds": 70,
+            "as_of": observed.isoformat(), "bars": [bar for _, bar in selected],
+            "omitted_unclosed": len(validated) - len(closed),
+            "last_bar_end": selected[0][0].isoformat() if selected else None,
+            "last_bar_age_seconds": age, "fresh": fresh,
+            "gaps": gaps, "latest_contiguous_count": contiguous,
+            "usable_for_entry": bool(fresh and contiguous >= 6),
+        }
 
     async def capacity(self, symbol, price):
         self.active()

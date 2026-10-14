@@ -7,6 +7,7 @@ timestamp therefore invalidates the cache; no missing ticks are inferred.
 import asyncio
 import json
 import random
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -69,6 +70,7 @@ class TossMarketStream:
         self.last_message_at = None
         self.last_gap_at = None
         self.error = None
+        self.monotonic = time.monotonic
 
     def status(self):
         return {
@@ -200,16 +202,16 @@ class TossMarketStream:
                 async with connect(WS_URL, additional_headers={"Authorization": f"Bearer {token}"}, open_timeout=15, max_size=1_000_000, ping_interval=None) as socket:
                     self.disconnect("Awaiting Toss subscription acknowledgment")
                     declared = None
-                    last_ping = asyncio.get_running_loop().time()
+                    last_ping = self.monotonic()
                     delay = 1
                     while True:
                         wanted = self.wanted()
                         if wanted != declared:
                             await socket.send(json.dumps(self.declaration(wanted)))
                             declared = wanted
-                        if asyncio.get_running_loop().time() - last_ping >= 60:
+                        if self.monotonic() - last_ping >= 60:
                             await socket.send("PING")
-                            last_ping = asyncio.get_running_loop().time()
+                            last_ping = self.monotonic()
                         try:
                             message = await asyncio.wait_for(socket.recv(), timeout=1)
                         except asyncio.TimeoutError:

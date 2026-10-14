@@ -230,6 +230,153 @@ async def test_stream_sends_application_ping_when_market_is_quiet(automation, mo
         await asyncio.gather(task, return_exceptions=True)
 
 
+async def test_stream_refreshes_token_after_unauthorized_handshake(automation, monkeypatch):
+    import websockets.asyncio.client
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+
+    _, watches, broker = automation
+    stream = TossMarketStream(watches.service, watches)
+    broker.access_token = "old-token"
+    broker.auth_lock = asyncio.Lock()
+    attempts = []
+    subscribed = asyncio.Event()
+
+    async def token():
+        if broker.access_token is None:
+            broker.access_token = "new-token"
+        return broker.access_token
+
+    class FakeSocket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def send(self, message):
+            subscribed.set()
+
+        async def recv(self):
+            await asyncio.Event().wait()
+
+    def fake_connect(*_args, **kwargs):
+        attempts.append(kwargs["additional_headers"]["Authorization"])
+        if len(attempts) == 1:
+            raise InvalidStatus(Response(401, "Unauthorized", Headers()))
+        return FakeSocket()
+
+    broker.token = token
+    monkeypatch.setattr(websockets.asyncio.client, "connect", fake_connect)
+    monkeypatch.setattr("kis_mcp.toss_fastpath.random.uniform", lambda *_: 0)
+    task = asyncio.create_task(stream.run())
+    try:
+        await asyncio.wait_for(subscribed.wait(), timeout=2.5)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert attempts == ["Bearer old-token", "Bearer new-token"]
+
+
+async def test_stream_reconnects_and_resubscribes_after_socket_loss(automation, monkeypatch):
+    import json
+
+    import websockets.asyncio.client
+
+    _, watches, broker = automation
+    stream = TossMarketStream(watches.service, watches)
+    declarations = []
+    second_connected = asyncio.Event()
+
+    async def token():
+        return "fake-token"
+
+    class FakeSocket:
+        def __init__(self, generation):
+            self.generation = generation
+            self.received = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def send(self, message):
+            declarations.append((self.generation, json.loads(message)))
+            if self.generation == 2:
+                second_connected.set()
+
+        async def recv(self):
+            if self.generation == 1:
+                self.received += 1
+                if self.received == 1:
+                    return json.dumps({"type": "subscriptions", "subscribed": ["orderbook:us:SOXL"], "rejected": []})
+                if self.received == 2:
+                    return json.dumps({"type": "message", "topic": "orderbook:us:SOXL", "data": book()})
+                raise ConnectionError("socket closed")
+            await asyncio.Event().wait()
+
+    def fake_connect(*_args, **_kwargs):
+        return FakeSocket(len({item[0] for item in declarations}) + 1)
+
+    broker.token = token
+    monkeypatch.setattr(websockets.asyncio.client, "connect", fake_connect)
+    monkeypatch.setattr("kis_mcp.toss_fastpath.random.uniform", lambda *_: 0)
+    task = asyncio.create_task(stream.run())
+    try:
+        await asyncio.wait_for(second_connected.wait(), timeout=2.5)
+        assert stream.books == {}
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert len(declarations) == 2
+    assert declarations[0][1] == declarations[1][1]
+
+
+async def test_stream_removes_rejected_topic_on_next_full_declaration(automation, monkeypatch):
+    import json
+
+    import websockets.asyncio.client
+
+    _, watches, broker = automation
+    stream = TossMarketStream(watches.service, watches)
+    declarations = []
+    redeclared = asyncio.Event()
+
+    async def token():
+        return "fake-token"
+
+    class FakeSocket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def send(self, message):
+            declarations.append(json.loads(message))
+            if len(declarations) == 2:
+                redeclared.set()
+
+        async def recv(self):
+            if len(declarations) == 1:
+                return json.dumps({"type": "subscriptions", "subscribed": ["orderbook:us:SOXL"],
+                                   "rejected": [{"target": "trade:us:SOXL", "code": "stock-not-found", "message": "bad"}]})
+            await asyncio.Event().wait()
+
+    broker.token = token
+    monkeypatch.setattr(websockets.asyncio.client, "connect", lambda *_args, **_kwargs: FakeSocket())
+    task = asyncio.create_task(stream.run())
+    try:
+        await asyncio.wait_for(redeclared.wait(), timeout=1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert "SOXL" not in next(item for item in declarations[1] if item["type"] == "trade:us")["codes"]
+
+
 async def test_guarded_order_blocks_before_submission_when_cost_exceeds_edge(automation):
     conditions, watches, broker = automation
     stream = TossMarketStream(watches.service, watches)

@@ -98,7 +98,18 @@ class TossWatches:
             now = datetime.now(KST)
             if not timedelta(0) < request.expires_at - now <= timedelta(hours=24):
                 raise TradingError("Watch expiry must be in the next 24 hours")
-            await self.broker.stock(request.symbol)
+        # A slow reference-data call must not hold the trading state lock.
+        await self.broker.stock(request.symbol)
+        async with self.lock:
+            previous = self.store.request(request.client_request_id, "toss_watch", payload)
+            if previous:
+                doc = self.store.document("toss_watches", previous["id"])
+                self.check_account(doc)
+                return self.public(doc)
+            self.service.active()
+            now = datetime.now(KST)
+            if not timedelta(0) < request.expires_at - now <= timedelta(hours=24):
+                raise TradingError("Watch expiry must be in the next 24 hours")
             doc = {
                 "id": str(uuid.uuid4()),
                 "symbol": request.symbol,
@@ -127,20 +138,21 @@ class TossWatches:
     async def observe_trade(self, symbol, quote, *, now=None):
         """Apply only validated live trades; callers never submit an order here."""
         now = now or datetime.now(KST)
-        async with self.lock:
-            if self.service.store.mode() != "real":
-                return
-            for doc in self.store.documents("toss_watches"):
-                if doc["status"] != "watching" or doc["symbol"] != symbol or not doc["kind"].startswith("price_"):
-                    continue
-                self.check_account(doc)
-                if now >= timestamp(doc["expires_at"]):
-                    doc["status"] = "expired"
-                    self.store.put_document("toss_watches", doc)
-                    continue
-                hit = evaluate(doc, quote=quote, now=now)
-                if hit is not None:
-                    self._trigger(doc, hit, now)
+        # No await in this state transition: it can run while slow REST reads
+        # hold the order lock, without interleaving another SQLite mutation.
+        if self.service.store.mode() != "real":
+            return
+        for doc in self.store.documents("toss_watches"):
+            if doc["status"] != "watching" or doc["symbol"] != symbol or not doc["kind"].startswith("price_"):
+                continue
+            self.check_account(doc)
+            if now >= timestamp(doc["expires_at"]):
+                doc["status"] = "expired"
+                self.store.put_document("toss_watches", doc)
+                continue
+            hit = evaluate(doc, quote=quote, now=now)
+            if hit is not None:
+                self._trigger(doc, hit, now)
 
     def _trigger(self, doc, hit, now):
         doc.update(status="triggered", triggered_at=now.isoformat(), evidence=hit)
@@ -167,20 +179,29 @@ class TossWatches:
                 elif self.service.store.mode() == "real" and self.service.settings.toss_credentials is not None:
                     self.check_account(doc)
                     active.append(doc)
-            quotes, bars = {}, {}
-            failures = 0
-            for symbol in {d["symbol"] for d in active if d["kind"].startswith("price_") and not self.stream_enabled}:
-                try:
-                    quotes[symbol] = await self.broker.quote(symbol)
-                except Exception:
-                    failures += 1
-            for symbol in {d["symbol"] for d in active if d["kind"] == "volume_breakout_1m"}:
-                try:
-                    bars[symbol] = await self.broker.candles(symbol, 7)
-                except Exception:
-                    failures += 1
-            evaluated_at = now if fixed_time else datetime.now(KST)
-            for doc in active:
+        quotes, bars = {}, {}
+        failures = 0
+        for symbol in {d["symbol"] for d in active if d["kind"].startswith("price_") and not self.stream_enabled}:
+            try:
+                quotes[symbol] = await self.broker.quote(symbol)
+            except Exception:
+                failures += 1
+        for symbol in {d["symbol"] for d in active if d["kind"] == "volume_breakout_1m"}:
+            try:
+                bars[symbol] = await self.broker.candles(symbol, 7)
+            except Exception:
+                failures += 1
+        evaluated_at = now if fixed_time else datetime.now(KST)
+        async with self.lock:
+            for snapshot in active:
+                doc = self.store.document("toss_watches", snapshot["id"])
+                if doc["status"] != "watching" or self.service.store.mode() != "real":
+                    continue
+                self.check_account(doc)
+                if evaluated_at >= timestamp(doc["expires_at"]):
+                    doc["status"] = "expired"
+                    self.store.put_document("toss_watches", doc)
+                    continue
                 try:
                     hit = evaluate(doc, quote=quotes.get(doc["symbol"]), candles=bars.get(doc["symbol"]), now=evaluated_at)
                 except Exception:

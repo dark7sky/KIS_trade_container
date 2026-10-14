@@ -7,7 +7,7 @@ import pytest
 from test_toss_automation import AutomationBroker, oco_request
 
 from kis_mcp.config import TossCredentials
-from kis_mcp.models import TossOrderInput, TradingError
+from kis_mcp.models import TossOrderInput, TossWatchInput, TradingError
 from kis_mcp.toss_conditions import TossConditions
 from kis_mcp.toss_fastpath import TossMarketStream, estimate_entry
 from kis_mcp.toss_service import TossTradingService
@@ -45,7 +45,6 @@ def test_entry_cost_rejects_stale_crossed_and_insufficient_edge():
 
 async def test_stream_validates_ack_and_does_not_fire_stale_or_replayed_trade(automation):
     _, watches, broker = automation
-    from kis_mcp.models import TossWatchInput
 
     await watches.create(TossWatchInput(
         client_request_id="fast-watch-1", symbol="SOXL", kind="price_at_or_above",
@@ -59,6 +58,69 @@ async def test_stream_validates_ack_and_does_not_fire_stale_or_replayed_trade(au
     assert watches.list()[0]["status"] == "triggered"
     assert watches.store.pending_count() == 1
     assert broker.quote_calls == 0
+
+
+async def test_live_trade_is_not_blocked_by_slow_minute_candle_query(automation):
+    _, watches, broker = automation
+    now = datetime.now(timezone.utc)
+    for suffix, kind, threshold in (("price", "price_at_or_above", "101"), ("volume", "volume_breakout_1m", None)):
+        await watches.create(TossWatchInput(
+            client_request_id="fast-watch-" + suffix, symbol="SOXL", kind=kind,
+            threshold=threshold, expires_at=now + timedelta(minutes=5),
+        ))
+    watches.stream_enabled = True
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_candles(*_):
+        started.set()
+        await release.wait()
+        return []
+
+    broker.candles = slow_candles
+    poll = asyncio.create_task(watches.tick())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(
+            watches.observe_trade("SOXL", {"price": "102", "broker_timestamp": stamp()}),
+            timeout=0.2,
+        )
+        assert next(d for d in watches.list() if d["kind"].startswith("price_"))["status"] == "triggered"
+    finally:
+        release.set()
+        await poll
+
+
+async def test_stopped_watch_is_not_retriggered_by_inflight_candle_query(automation):
+    _, watches, broker = automation
+    now = datetime.now(timezone.utc)
+    created = await watches.create(TossWatchInput(
+        client_request_id="fast-watch-stop-race", symbol="SOXL", kind="volume_breakout_1m",
+        expires_at=now + timedelta(minutes=5),
+    ))
+    future = now + timedelta(minutes=2)
+    end = future.replace(second=0, microsecond=0)
+    bars = [
+        {"timestamp": (end - timedelta(minutes=i)).isoformat(),
+         "close": "110" if i == 0 else "100", "high": "111" if i == 0 else "105",
+         "volume": "300" if i == 0 else "100"}
+        for i in range(6)
+    ]
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_candles(*_):
+        started.set()
+        await release.wait()
+        return bars
+
+    broker.candles = slow_candles
+    poll = asyncio.create_task(watches.tick(now=future))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    stop = asyncio.create_task(watches.stop(created["id"]))
+    await asyncio.sleep(0.01)
+    release.set()
+    await asyncio.gather(poll, stop)
+    assert watches.list()[0]["status"] == "stopped"
+    assert watches.store.pending_count() == 0
 
 
 async def test_stream_rejected_subscription_fails_closed(automation):

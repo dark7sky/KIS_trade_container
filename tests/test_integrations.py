@@ -399,6 +399,28 @@ async def test_telegram_retry_and_duplicate_suppression(settings):
         store.close()
 
 
+async def test_telegram_discards_legacy_watch_signal_but_sends_fill(settings):
+    store = Store(settings.data_dir)
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content)["text"])
+        return httpx.Response(200, json={"ok": True})
+
+    notifier = Notifications(settings, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    try:
+        store.event("toss-watch:old", {"watch_id": "old"}, "old watch signal")
+        store.event("fill:new", {"type": "fill"}, "new fill")
+        assert store.pending_count() == 2
+        await notifier.flush()
+        assert seen == ["new fill"]
+        assert store.pending_count() == 0
+        assert store.db.execute("SELECT count(*) FROM events WHERE id='toss-watch:old'").fetchone()[0] == 1
+    finally:
+        await notifier.close()
+        store.close()
+
+
 async def test_health_http_lifespan_and_failed_worker(settings, broker):
     app = create_app(settings, broker=broker)
     async with app.router.lifespan_context(app):

@@ -214,9 +214,11 @@ async def test_watch_fires_once_and_survives_restart(automation):
     broker.current_price = "101"
     await again.tick()
     assert again.list()[0]["status"] == "triggered"
-    assert again.store.pending_count() == 1
+    assert again.list()[0]["evidence"]["price"] == "101"
+    assert again.store.pending_count() == 0
+    assert again.store.db.execute("SELECT count(*) FROM events WHERE id=?", ("toss-watch:" + created["id"],)).fetchone()[0] == 1
     await watches.tick()
-    assert again.store.pending_count() == 1
+    assert again.store.pending_count() == 0
     assert broker.quote_calls == 2
 
 
@@ -277,6 +279,7 @@ async def test_minute_breakout_watch_alerts_once(automation):
     ]
     await watches.tick(now=end + timedelta(seconds=10))
     assert watches.list()[0]["status"] == "triggered"
-    assert watches.store.pending_count() == 1
+    assert watches.list()[0]["evidence"]["bar_end"] == end.isoformat()
+    assert watches.store.pending_count() == 0
     await watches.tick(now=end + timedelta(seconds=11))
-    assert watches.store.pending_count() == 1
+    assert watches.store.pending_count() == 0

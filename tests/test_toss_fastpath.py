@@ -56,7 +56,7 @@ async def test_stream_validates_ack_and_does_not_fire_stale_or_replayed_trade(au
     assert watches.list()[0]["status"] == "watching"
     await stream.handle({"type": "message", "topic": "trade:us:SOXL", "data": {"price": "102", "volume": "2", "timestamp": stamp(), "currency": "USD"}})
     assert watches.list()[0]["status"] == "triggered"
-    assert watches.store.pending_count() == 1
+    assert watches.store.pending_count() == 0
     assert broker.quote_calls == 0
 
 

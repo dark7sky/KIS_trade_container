@@ -192,6 +192,44 @@ async def test_stream_worker_subscribes_without_live_network(automation, monkeyp
     assert stream.status()["healthy"] is False
 
 
+async def test_stream_sends_application_ping_when_market_is_quiet(automation, monkeypatch):
+    import websockets.asyncio.client
+
+    _, watches, broker = automation
+    stream = TossMarketStream(watches.service, watches)
+    clock = [0]
+    stream.monotonic = lambda: clock[0]
+    ping_sent = asyncio.Event()
+
+    async def token():
+        return "fake-token"
+
+    class FakeSocket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def send(self, message):
+            if message == "PING":
+                ping_sent.set()
+
+        async def recv(self):
+            clock[0] = 61
+            await asyncio.sleep(0)
+            return '{"type":"pong"}'
+
+    broker.token = token
+    monkeypatch.setattr(websockets.asyncio.client, "connect", lambda *_args, **_kwargs: FakeSocket())
+    task = asyncio.create_task(stream.run())
+    try:
+        await asyncio.wait_for(ping_sent.wait(), timeout=0.3)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_guarded_order_blocks_before_submission_when_cost_exceeds_edge(automation):
     conditions, watches, broker = automation
     stream = TossMarketStream(watches.service, watches)

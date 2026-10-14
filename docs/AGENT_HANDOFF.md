@@ -1,10 +1,20 @@
 # Personal Trading MCP 에이전트 인계
 
-최종 문서 점검: 2026-10-13 (Asia/Seoul). 로컬: 토스 미국주식 추가 검증 완료. 마지막 기록된 운영 배포: `28a1a63` (이번 작업에서 배포 상태 재확인 없음).
+최종 문서 점검: 2026-10-14 (Asia/Seoul). Personal Trading 운영 배포 완료: 4a655c7 (거래 코드 ee695fe).
 이 문서는 대화 없이 작업을 이어가기 위한 지도다. 실행 시점의 Git·컨테이너·브로커 상태는 다시 확인해야 한다.
 실제 비밀값과 주문 식별자는 기록하지 않는다.
 
 ## 1. 현재 상태와 다음 작업
+
+### 2026-10-14 Personal Trading 토스 미국주식 운영 배포 완료
+
+- 사용자 승인에 따라 코드·문서 HEAD 4a655c7을 origin/main으로 푸시하고 Docker VM root@192.168.45.222의 /srv/kis-trade에 동일 HEAD의 추적 파일을 동기화했다. 거래 구현 코드는 ee695fe다.
+- 토스 세 설정을 운영 .env에 반영했고 권한 600 유지, 기존 KIS·OAuth·DB 설정 보존. 토스 계좌 식별값은 본인 종합매매 계좌 1개 조회로 확인했다. 키/시크릿/계좌/원본 응답은 기록하지 않았다.
+- docker compose config --quiet 통과 후 MCP만 이미지 재빌드·재기동. 복구용 이전 이미지 태그 kis-trade-mcp:before-toss-20261014 보존. 새 이미지 ID sha256:2ec5a5447b8710855a1382f4412b873ffa99f4c11de333e24df09fbcd1c450e3.
+- 배포 검증: kis-trade-mcp-1 running/healthy, RestartCount=0. 실제 설치된 Python 소스 11개 SHA-256이 배포 HEAD와 모두 일치했다. 설치된 앱 설정은 Personal Trading, 전체 도구 21개 중 toss_* 10개, 토스 구성 인식 정상. 검증용 추가 앱 lifespan/Store/폴러는 실행하지 않았다.
+- 공개 https://trademcp.ysyoo.link/healthz HTTP 200(status/store/workers=ok), 미인증 /mcp 초기화 HTTP 401 확인. Keycloak/PostgreSQL은 기존 3주 실행 상태 유지, 운영 .env와 영속 데이터 보존.
+- 실제 Docker VM의 토스 인증·계좌·AAPL 시세·잔고·USD 현금 매수가능액·매도가능수량·미국 시간표 조회는 배포 직전 모두 HTTP 200으로 확인했다. 인증된 외부 MCP 클라이언트에서 새 도구를 호출하는 흐름과 실제 주문·취소는 미검증이다. 배포/검증 과정에서 실제 주문·취소·모드 변경은 실행하지 않았다.
+- 로컬 전체 테스트 154 passed, 운영 의존성 감사 취약점 없음. 이번 후속 완료 기록은 문서 전용으로 커밋·푸시하며 이미지 재빌드는 필요하지 않다. 기존 사용자 원격 제어 문서 변경은 작업 트리에 보존한다.
 
 ### 2026-10-14 토스 설정 전송·MCP 업데이트 (배포 진행 중)
 
